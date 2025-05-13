@@ -1,0 +1,1870 @@
+---
+title: "Boschettona23 - Taxonomy"
+author: "Riccardo Frizzo"
+date: "2024-08-06"
+output:
+  word_document: default
+  pdf_document: default
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: console
+---
+
+#Init
+```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+knitr::opts_chunk$set(echo = FALSE, fig.width = 12, fig.height = 10, size = 1)  #7 and 4
+
+# Objects to keep
+keep_obj<-c("keep_obj",                       # This vector :)
+            "mag_MPSE_norm", "vir_MPSE_norm", # Full MPSE analysis
+            "vir_diff", "mag_diff",           # Full differential abundance analysis
+            "tree_data", "tree_colors",       # data for the MAG phylo tree
+            "saltmarsh_colors",               # Base group colors
+            "mag_taxonomy",                   # MAG and vOTU taxonomy
+            "pm",                             # Plotting variables
+            "find_int_multiplier",            # Custom functions
+            "genomad_checkv",                  # Virus infos
+            "map", "tax2", "vir_tax",
+            "vir_map", "vir_map1", "metadata",
+            "mv_MPSE_norm"# Integrative taxonomic analysis
+            )
+# Functions
+# Given a vector of non-integers, find the minimum multiplier to obtain an all-integers vector
+find_int_multiplier <- function(var, mult=1e2) {
+  if (length(setdiff(var*mult,round(var*mult,0)))==0) {
+    #print(paste("Minimum multiplier:", mult))
+    return(var*mult)
+  } else {
+    #print(paste("Current multiplier:", mult))
+    return(find_int_multiplier(var = var, mult=mult*10))
+  } 
+}
+
+hcl.colors(n=3, palette ="Zissou 1",alpha = 0.9)
+zy=c("#3B99B1E6","#FADB2BE6","#A5191CE6")
+zy=c("#A5191CE6","white","#65B59AE6")
+scales::show_col(zy[c(3,1,2)],ncol = 3)
+saltmarsh_colors = c(Constructed=zy[1], Natural=zy[3], ns = zy[2])
+```
+#---
+# MAGS
+## PROCESS
+## (1) Preprocessing
+
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+libs<-c("MicrobiotaProcess", "phyloseq", "data.table", "tidyverse") #"tidyverse", "data.table", "magrittr", 
+invisible(lapply(libs, require, character.only = TRUE))
+
+#Import mapping data and GTDBtk taxonomy classification
+map<-
+ fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/coverm/mag_mapping") %>% filter(Genome != "unmapped")
+tax<-
+  rbind(
+  fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gtdb220/gtdbtk.bac120.summary.tsv"),
+  fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gtdb220/gtdbtk.ar53.summary.tsv"))
+
+ct="TPM" #Set TPM as mapping metric
+
+#Select and tidy data
+map_columns<-c(
+  names(map)[grepl("Genome", names(map))], 
+  names(map)[grepl(ct, names(map))]
+  )
+
+#Select only columns matching the selected mapping metric
+map<-map[,..map_columns]
+names(map) %<>%
+    str_remove(" TPM") %>% str_remove_all("metaG_|.fastq.gz|.fq.gz|.fastq") %>% str_remove("_1")
+names(map)[1]="MAG"
+map %<>% column_to_rownames("MAG")
+
+#Tidy up taxonomy table  
+tax1<-tax$classification %>% str_split(";", simplify = TRUE) %>% data.table
+names(tax1)= c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+tax2<-cbind(data.frame(MAG=tax$user_genome), tax1) %>% column_to_rownames("MAG")
+
+# Export tidy taxonomy
+fwrite(tax2 %>% rownames_to_column("MAG"),
+       "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/tax/mag_taxonomy_mags99c70c10a99.csv"
+       )
+#Extract metadata from sample names
+metadata<-data.frame(Sample = names(map) %>% str_remove_all("metaG_|.fastq"),
+                     Group = 
+                       str_extract(names(map), "Nat|Art") %>% 
+                       factor(levels = c("Art", "Nat"),
+                              labels = c("Constructed", "Natural"))
+                     ) %>% column_to_rownames("Sample")
+
+#Merge taxonomy data with mapping data and metadata into a phyloseq object
+#Convert the phyloseq object into a MPSE dataset
+mag_MPSE = phyloseq(phyloseq::otu_table(as.matrix(map), taxa_are_rows = TRUE),
+                phyloseq::tax_table(as.matrix(tax2)),
+                phyloseq::sample_data(metadata)) %>% as.MPSE()
+
+# Set a minimum RPM threshold
+mag_MPSE %<>% mutate(Abundance=
+                       case_when(
+                         Abundance < 3 ~ 0,
+                         Abundance >= 3 ~ Abundance))
+
+# Filter out completely unmapped vOTUs
+mag_MPSE %>%
+  group_by(OTU) %>%
+  summarise(sum=sum(Abundance)) %>% 
+  filter(sum==0) %>% pull(OTU)->unmapped_mags
+
+#Hellinger normalization
+mag_MPSE_norm <- 
+  mp_decostand(mag_MPSE, method = "hellinger", .abundance = Abundance)
+
+#Multiply to integer to avoid errors in the alpha-diversity functions, as suggested in https://github.com/YuLab-SMU/MicrobiotaProcess/issues/35
+
+#Find minimum multiplier
+mag_MPSE_norm %<>% mutate(hellinger_int = find_int_multiplier(hellinger))
+
+#Calculate abundance ----
+
+mag_MPSE_norm %<>%
+  mp_cal_abundance(
+    .abundance = hellinger,
+    force = T,
+    action = "add"
+  )
+
+save(mag_MPSE_norm,
+     file="~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_MPSE_norm_mags99c70c10a99.RData"
+     )
+
+# Prepare taxonomy for micom ################################
+dir.create("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq/Rtables")
+dir.create("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/micom/Rtables")
+# Extract taxonomy
+mag_MPSE_norm %>% 
+  dplyr::select(OTU, Domain, Phylum, Class, Order, Family, Genus, Species) %>% 
+  unique %>% 
+  janitor::clean_names() -> micom_manifest
+
+data.table(
+  file=list.files(
+        path="/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq/mean_min_medium_models_nocore_reac",
+        pattern=".xml",
+        full.names = T)) %>% 
+  mutate(otu=str_extract(file, "[:alpha:]+_SemiBin_[:digit:]+"))-> model_paths
+
+merge(model_paths, micom_manifest, by = "otu") %>% 
+  dplyr::rename(kingdom=domain) %>% 
+  mutate(species=otu) %>%
+  dplyr::select(!otu) %>%
+  fwrite("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/micom/Rtables/manifest.csv")
+
+# Prepare abundance data for micom
+mag_MPSE_norm %>% 
+  data.frame %>%
+  janitor::clean_names() %>%
+  dplyr::select(otu, sample, relhellinger_by_sample) %>%
+  mutate(species=otu) %>%
+  dplyr::rename(id=otu,
+                sample_id=sample,
+                abundance=relhellinger_by_sample) %>%
+    fwrite("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/micom/Rtables/micom_abundance.csv")
+
+# Subset by clusters
+fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_analysis_4sep24.tsv") %>% filter(cluster=="C2") %>% pull(OTU)-> cluster_OTU_ids
+
+mag_MPSE_norm %>% 
+  dplyr::select(OTU, Domain, Phylum, Class, Order, Family, Genus, Species) %>% 
+  unique %>% filter(OTU %in% cluster_OTU_ids) %>%
+  janitor::clean_names() -> micom_manifest
+
+data.table(
+  file=list.files(
+        path="/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq/mean_min_medium_models_nocore_reac",
+        pattern=".xml",
+        full.names = T)) %>% 
+  mutate(otu=str_extract(file, "[:alpha:]+_SemiBin_[:digit:]+")) %>%
+filter(otu %in% cluster_OTU_ids)-> model_paths
+
+merge(model_paths, micom_manifest, by = "otu") %>% 
+  dplyr::rename(kingdom=domain) %>% 
+  mutate(species=otu) %>%
+  dplyr::select(!otu) %>%
+  fwrite("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/micom/Rtables/manifest_C2.csv")
+
+# Prepare abundance data for micom
+mag_MPSE_norm %>% 
+  data.frame %>%
+  janitor::clean_names() %>%
+  dplyr::select(otu, sample, relhellinger_by_sample) %>%
+  mutate(species=otu) %>%
+  dplyr::rename(id=otu,
+                sample_id=sample,
+                abundance=relhellinger_by_sample) %>%
+filter(id %in% cluster_OTU_ids) %>%
+    fwrite("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/micom/Rtables/micom_abundance_C2.csv")
+
+#Clean the environment
+#rm(list=ls()[-which(ls() %in% keep_obj)])
+
+```
+## REPORT
+## (2) Taxonomic distribution of MHQ MAGs (Phylogenetic tree)
+
+Taxonomy data was processed in R 4.2.3 with "tidyverse", "data.table", "ggtree", "ape", and "tidytree" packages.
+The GTDBtk taxonomy tree was pruned to represent only the identified MHQ-MAGs.
+
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+libs<-c("tidyverse", "data.table", "ggtree", "magrittr", "ape", "tidytree"); invisible(lapply(libs, require, character.only = TRUE))
+
+tree <- read.tree("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gtdb220/classify/gtdbtk.backbone.bac120.classify.tree")
+
+mag_taxonomy <- rbind(
+    fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gtdb220/classify/gtdbtk.bac120.summary.tsv")) %>%
+      dplyr::select(user_genome, classification) %>%
+      dplyr::rename(label = user_genome, taxonomy = classification) %>% filter(!grepl("Unclassified", taxonomy)) %>%
+  mutate(phylum=str_remove(str_extract(taxonomy, "p__[:alnum:]+"), "p__"))
+
+
+# Prune the tree to include only the tips present in tax_data
+custom_hits<-which(tree$tip.label %in% mag_taxonomy$label)
+pruned_tree <- tidytree::keep.tip(tree, custom_hits)
+
+# Join taxonomy with tree tips
+tree_data <- fortify(pruned_tree) %>%   #or pruned_tree
+  left_join(mag_taxonomy, by = "label")
+
+# Extrapolate phylogenetic distance
+mag_tree <- read.tree("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gtdb220/classify/gtdbtk.backbone.bac120.classify.tree")
+tree_dist_matrix <- cophenetic.phylo(mag_tree)
+mag_dist_mat<-tree_dist_matrix[grepl("art|nat", colnames(tree_dist_matrix)),grepl("art|nat", colnames(tree_dist_matrix))]
+mag_dist_vector <- as.vector(mag_dist_mat[upper.tri(mag_dist_mat)])
+dist(mag_dist_mat) %>% hclust-> tax_hclust
+data.frame(mag=tax_hclust$labels,
+           phylo_dist=tax_hclust$order) %>% column_to_rownames("mag")->phylogenetic_distance_hclust
+
+
+
+#Export
+#dir.create("~/nvme4TB/riccardo/analysis/boschettona23/Results/figures")
+#ggsave(plot = tree,
+#       filename = "~/nvme4TB/riccardo/analysis/boschettona23/Results/figures/pruned_tree_mhq_mags.png",
+#       units = "in",
+#       width = 5,
+#       height = 5, 
+#       dpi = 600
+#       )
+
+#Clean environment
+rm(list=ls()[-which(ls() %in% keep_obj)])
+
+#Set knitting options for the next plot
+knitr::opts_chunk$set(echo = FALSE, fig.width = 7, fig.height = 4,size = 1)  #7 and 4
+```
+
+Phylogenetic tree of identified MHQ-MAGs (N = 277), dereplicated at strain level (99% Average Nucleotide Identity or ANI). 
+Tip labels and color-coding indicate the phylum information.
+
+
+
+## (3) Alpha- and Beta- diversity of MHQ-MAGs across saltmarsh types
+
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+
+require(tidyverse)
+require(MicrobiotaProcess)
+
+#Define colors
+mag_MPSE_norm1=mag_MPSE_norm
+
+#Calculate alpha indexes ---- 
+mag_MPSE_norm1 %<>% mp_cal_alpha(.abundance=hellinger_int, force = T)
+
+#Calculate Bray-curtis distance between samples ----
+mag_MPSE_norm1 %<>% mp_cal_dist(.abundance=hellinger, distmethod="bray")
+mag_MPSE_norm1 %<>% mp_cal_pcoa(.abundance=hellinger, distmethod="bray")
+
+
+#PCoA Analysis ----
+mag_MPSE_norm1 %>%
+  mp_plot_ord(
+    .ord = pcoa, 
+    .group = Group, 
+    .color = Group, 
+    .size = Observe, 
+    .alpha = Shannon,
+    ellipse = TRUE,
+    show.legend = FALSE, # don't display the legend of stat_ellipse 
+    show.sample = FALSE
+  ) +
+  scale_fill_manual(
+    values = saltmarsh_colors,
+    guide = guide_legend(keywidth=0.6, keyheight=0.6, label.theme=element_text(size=6.5))
+  ) +
+  scale_color_manual(
+    values= saltmarsh_colors,
+    guide = guide_legend(keywidth=0.6, keyheight=0.6, label.theme=element_text(size=6.5))
+  ) +
+  scale_size_continuous(
+    range=c(1, 3),
+    guide = guide_legend(keywidth=0.6, keyheight=0.6, label.theme=element_text(size=6.5))
+  ) +
+  scale_alpha_continuous(
+    range=c(0.5, 1),
+    guide = guide_legend(keywidth=0.6, keyheight=0.6, label.theme=element_text(size=6.5))
+  ) +
+  labs(size = "Observed")-> gg_beta_mag
+ggsave(plot = gg_beta_mag, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/bray_curtis_pcoa_mag_poster.png", scale = 1, width = 6, height = 4, units = "in")
+
+# Check significance of ordination
+mag_MPSE_norm1 %<>% mp_adonis(
+.abundance = hellinger,
+.formula = ~ Group,
+distmethod = "bray",
+permutation = 9999,
+action = "add"
+)
+# Extract results
+mag_MPSE_norm1 %>% mp_extract_internal_attr(name = adonis) %>% mp_fortify()
+
+```
+
+Principal Coordinate Analysis on Bray-Curtis distances, boxplots indicate PC1 and PC2 Bray-Curtis distance distribution.
+Point size reflects Observed alpha diversity. Point alpha reflects Shannon's alpha diversity.
+
+
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+require(ggstatsplot)
+mag_MPSE_norm1@colData %>% data.frame %>% dplyr::select(Observe, Shannon, Pielou, Group)->alpha
+
+ggstatsplot::ggbetweenstats(alpha, Group, Observe, title = "Observed",
+               xlab = "", ylab = "", bf.message = F, results.subtitle = T,
+               violin.args = list(width = 0.5, alpha = 0, na.rm = TRUE, color = NA)) + 
+  scale_color_manual(values = saltmarsh_colors) +
+  theme(plot.subtitle = element_text(size = 6)) +
+ggstatsplot::ggbetweenstats(alpha, Group, Pielou, title = "Pielou",
+               xlab = "", ylab = "", bf.message = F, results.subtitle = T,
+               violin.args = list(width = 0.5, alpha = 0, na.rm = TRUE, color = NA)) + 
+  scale_color_manual(values = saltmarsh_colors) +
+  theme(plot.subtitle = element_text(size = 6)) +
+ggstatsplot::ggbetweenstats(alpha, Group, Shannon, title = "Shannon's H",
+               xlab = "", ylab = "", bf.message = F, results.subtitle = T,
+               violin.args = list(width = 0.5, alpha = 0, na.rm = TRUE, color = NA)) +
+  scale_color_manual(values = saltmarsh_colors) +
+  theme(plot.subtitle = element_text(size = 6)) -> gg_mag_alpha
+
+ggsave(plot = gg_mag_alpha, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_alpha.png", scale = 1, width = 10, height = 4, units = "in", dpi = 600)
+
+#Clean environment
+rm(list=ls()[-which(ls() %in% keep_obj)])
+
+#Set knitting options for the next plot
+knitr::opts_chunk$set(echo = FALSE, fig.width = 12, fig.height = 10,size = 1)  #7 and 4
+```
+
+Distribution of Shannon's and Observed alpha diversity across the Constructed and Natural sites
+
+## (4) Differential abundance of MHQ-MAGs 
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+require(caret)
+require(MASS)
+require(ggtreeExtra)
+
+
+mag_rel_abund<-mag_MPSE_norm %>% dplyr::select(OTU, Sample, Group, RelhellingerBySample)
+
+#Make wide dataset
+mag_rel_abund %>% 
+  pivot_wider(names_from = OTU,
+              values_from = RelhellingerBySample
+              )-> mag_rel_abund_w
+
+mag_rel_abund_w %>% dplyr::select(!Sample)->mag_rel_abund_wg
+
+#Univariate analysis ----
+#t.test / wilcox ----
+mag_rel_abund %>%
+  group_by(OTU) %>% 
+  mutate(shapiro = shapiro.test(RelhellingerBySample)$p.value) %>%
+  summarise(
+    shapiro = unique(shapiro),
+    t_test = broom::tidy(t.test(RelhellingerBySample ~ Group))$p.value,
+    wilcox_test = broom::tidy(wilcox.test(RelhellingerBySample ~ Group))$p.value,
+    .groups = 'drop') %>% 
+  mutate(
+    test_pval=
+     case_when(
+     shapiro<0.05 ~ wilcox_test,
+     shapiro>0.05 ~ t_test))->MAG_univariate
+
+MAG_univariate %>%
+  mutate(ttest_fdr=p.adjust(t_test, method = "BH"),
+         wilcox_test_fdr=p.adjust(wilcox_test, method = "BH"),
+         ) %>% view
+
+mag_rel_abund %>%
+  group_by(OTU, Group) %>%
+  summarise(mean=mean(RelhellingerBySample),
+            ) %>% pivot_wider(values_from = mean, names_from = Group) -> MAG_means
+names(MAG_means)=c("OTU", "mean_mag_abund_Art", "mean_mag_abund_Nat")
+
+#Multivariate analysis ----
+#LDA - Linear Discriminant Analysis
+# Split the data into training (80%) and test set (20%)
+
+set.seed(666)
+
+training.samples <- mag_rel_abund_wg$Group %>%
+  createDataPartition(p = 0.8, list = FALSE)
+mag_rel_abund_w[training.samples,]$Sample
+
+train.data <- mag_rel_abund_wg[training.samples, ]
+test.data <- mag_rel_abund_wg[-training.samples, ]
+
+# Estimate preprocessing parameters
+preproc.param <- train.data %>% 
+  preProcess(method = c("center", "scale")) #Scale and center data
+
+# Transform the data using the estimated parameters
+train.transformed <- preproc.param %>% predict(train.data)
+test.transformed <- preproc.param %>% predict(test.data)
+
+# Fit the model
+model <- lda(Group~., train.transformed)
+
+# Make prediction
+predictions <- model %>% predict(test.transformed) %>% data.frame
+
+# Test prediction
+mean(predictions$class==test.transformed$Group)
+
+#Extract model information (group center of gravity, linear discriminants)
+model$means %>% t %>% data.frame()-> MAG_LDA_mean
+MAG_LDA_mean[rownames(model$scaling),] %>% 
+  add_column(Coefficient=model$scaling) %>% rownames_to_column("OTU") %>% data.table -> MAG_LDA_coeff
+names(MAG_LDA_coeff)=c("OTU", "LDA_mean_Art", "LDA_mean_Nat", "LDA_Coefficient")
+
+#Merge univariate and multivariate results
+mag_diff<-merge(MAG_means, merge(MAG_univariate, MAG_LDA_coeff, by = "OTU")) %>%
+  mutate(FC=(mean_mag_abund_Art-mean_mag_abund_Nat)/mean_mag_abund_Nat, .after = "mean_mag_abund_Nat") %>%
+  mutate(log_pval=log(test_pval), .after="test_pval") %>%
+  mutate(LDA_decision=
+           case_when(
+             LDA_Coefficient > 0 ~ "Natural",
+             LDA_Coefficient < 0 ~ "Constructed")) %>%
+  mutate(condition_higher_abund = 
+           case_when(test_pval<=0.05 & mean_mag_abund_Art>mean_mag_abund_Nat ~ "Constructed",
+                     test_pval<=0.05 & mean_mag_abund_Art<mean_mag_abund_Nat ~ "Natural"))
+         
+
+
+#Select significant OTUs
+mag_diff_sig<-mag_diff %>% filter(test_pval<=0.05)
+names(mag_diff_sig)[1]="label"
+
+# Export 
+mag_diff %>%
+  fwrite("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_diff_mags99c70c10a99.csv")
+ggplot(mag_diff_sig, aes(x=FC, y=label, fill=LDA_decision)) + geom_bar(stat="identity")
+
+```
+
+
+#### Double check using mp_diff_analysis from MicrobiotaProcess package
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+#Double checks ----
+# MPSE marker discovery pipeline (Segata et al. 2021)
+mag_diff_MPSE<-mag_MPSE_norm %>%
+  mp_diff_analysis(
+    .abundance=hellinger,
+    .group=Group,
+    .sec.group = NULL, # !!
+    action = "add",
+    tip.level = "OTU",
+    force = TRUE,  # !!
+    relative = TRUE,
+    taxa.class = "all",#!!tax_level,
+    first.test.method = "kruskal.test",
+    first.test.alpha = 0.05,
+    second.test.method = "wilcox.test",
+    second.test.alpha = 0.05,
+    p.adjust = "fdr",  # !!
+    filter.p = "pvalue",  # !!
+    cl.min = 5,
+    cl.test = TRUE,
+    subcl.min = 3,
+    subcl.test = TRUE,
+    ml.method = "lda",
+    normalization = 1e+06,
+    ldascore = 2,
+    bootnums = 30,
+    sample.prop.boot = 0.7,
+    ci = 0.95,
+    seed = 666,
+    type = "OTU"
+    )
+
+#Check results correspondence with my tests with MPSE
+mag_sig_MPSE<-mag_diff_MPSE %>% data.frame %>% filter(pvalue<=0.05)%>% pull(OTU) %>% unique
+intersect(mag_sig_MPSE,mag_diff_sig$label)-> mag_sig_intersection
+paste0("MPSE analysis results in ", length(mag_sig_MPSE)," significant OTUs.\n ",
+      "Statistical analysis results in ", length(mag_diff_sig$label), " significant OTUs.\n",
+      length(mag_sig_intersection), " OTUs are coherent (", round((length(mag_diff_sig$label)/length(unique(c(mag_sig_MPSE,mag_diff_sig$label))))*100,0),
+      "% )") %>% cat
+knitr::opts_chunk$set(echo = FALSE, fig.width = 7, fig.height = 4,size = 1)  #7 and 4
+```
+### Relative abundance distribution
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+mag_rel_abund %>%
+  ggplot(
+    aes(x=RelhellingerBySample,
+        y=reorder(Group, -desc(RelhellingerBySample)),
+         color = Group)) +
+  geom_point(size=1) + theme_minimal() +
+    theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major.y = element_blank()
+  ) + xlab("MAGs Relative abundance per sample (%)") +
+  scale_color_manual(values = saltmarsh_colors)
+
+rm(list=ls()[-which(ls() %in% keep_obj)])
+```
+
+# PLOT: Barplots
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+
+mag_MPSE_norm %>%
+          mp_plot_abundance(
+            .abundance=RelhellingerBySample,
+            .group=Group,
+            taxa.class = Phylum,
+            topn = 20,
+            relative = FALSE,
+            force = T
+          ) -> gg_mag_barplot_phylum
+
+ggsave(plot = gg_mag_barplot_phylum, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/presentations/mag_barplot_phylum.png",
+       width = 10,
+       height = 6,
+       dpi = 600
+       )
+```
+
+# PLOT: PhyloTree
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+mag_analysis<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_analysis_co_de_24sep24.tsv")
+
+#Plotting variables
+#pm<-c(-2,-2,-2,-2)
+pm<-c(0,0,0,0)
+
+pal<-"Zissou 1"
+tree_colors<-hcl.colors(n = length(unique(mag_taxonomy$phylum)), palette = pal, rev = T)
+require(colorspace)
+c(darken("#F5191C", 0.3), "#ED5600", darken("#E2BAD5", 0.3), lighten("#E79C05", 0.3), "salmon", darken("#39A6A9", 0.3), "yellow2", "#CECA87","pink",  "#95BE95", "#C75DAA", "slateblue4", "#37C6A9", lighten("blue", 0.7)) %>% alpha(0.8) -> tree_colors
+names(tree_colors)=unique(mag_taxonomy$phylum)
+
+# Add class
+tree_data %<>% 
+  mutate(class= str_remove(str_extract(taxonomy, "c__[:alnum:]+"), "c__"))
+#Plot tree
+ggtree(tree_data, layout="fan", open.angle=10, size = 0.2) +
+  theme(legend.position = "none", plot.margin = unit(pm, "cm")) +
+    scale_color_manual(
+    values = tree_colors[1:length(unique(mag_taxonomy$phylum))],
+    na.value = "black") +
+  scale_size_continuous(range = c(0.05, 0.5))-> tree;tree # Base tree
+
+mag_MPSE_norm %>% 
+  as.data.frame %>% 
+  dplyr::select(OTU, RelhellingerBySample, Sample, Group) -> abund
+
+tree1 <- tree  +
+  geom_tippoint(mapping=aes(color=phylum), 
+                   size=1,
+                   show.legend=TRUE) # Colored tips
+
+mag_analysis %>% dplyr::select(OTU, condition_higher_abund) -> diff
+
+#metC %>% pivot_longer(cols=contains("input")) -> test
+require(ggtreeExtra)
+library(ggnewscale)
+
+tree1 +        
+  geom_fruit(
+    data=abund,
+    geom=geom_tile,
+    mapping=aes(
+      y=OTU, x=Sample,
+      alpha=(RelhellingerBySample), fill= Group),
+      color = "grey50",
+    offset = 0.02,
+    size = 0.02,
+    linewidth = 0.1,
+    axis.params =list(
+     axis="x", text.angle = 60, text.size=1, hjust=1.1, vjust = 0.1)) +
+
+  geom_fruit(data=diff, geom=geom_tile,
+                  mapping=aes(y=OTU, fill=condition_higher_abund),
+                  color = "grey50", offset = 0.03, pwidth = 0.05,  size = 0, linewidth = 0.1) +
+    scale_fill_manual(values = saltmarsh_colors)-> tree2;tree2 
+
+#add abundance heatmap
+abund %>% group_by(OTU, Group) %>% summarise(mean=mean(RelhellingerBySample)) -> abund_mean
+tree2 + 
+  geom_fruit(
+    data=abund_mean, geom=geom_bar,
+    mapping=aes(y=OTU, x=mean, fill= Group),
+    pwidth=0.38, 
+    orientation="y", 
+    stat="identity",
+    color = "black",
+    linewidth = 0.1) -> tree3 # add cumulative abundance
+
+#tax_rank<- tree_data %>% filter(!is.na(phylum)) %>% pull(phylum) %>% unique
+tax_rank<- tree_data %>% filter(!is.na(class)) %>% pull(class) %>% unique
+
+# Prepare a dataset for label text, position, and angle
+require(foreach)
+foreach (i = tax_rank)%do%{
+tree_data %>% filter(class == i) -> tp
+  data.frame(angle = mean(tp$angle),
+             node = MRCA(tree, tp$label),
+             tax = str_remove_all(i, " "))
+  } %>% rbindlist() -> label_positions
+
+# Edit the angle and label position to perfect the tree
+label_positions[17,]$angle = 0
+#label_positions[20,]$angle = 0
+#label_positions[17,]$angle = 0
+
+# Plot the three
+{tree3->tree4
+for (i in 1:nrow(label_positions)){
+tree4 +
+  geom_cladelab(node=label_positions$node[i],
+                label=paste0(label_positions$tax[i],""),
+                offset = 1.3, #linear =-2.05,
+                offset.text = 0.05,
+                align = T,
+                hjust = -0.1, #linear = 1.1
+                fontsize = 3, #1.5
+                color = NA,
+                angle = label_positions$angle[i] # linear=0
+                )-> tree4
+};tree4
+  }
+
+tree4 + 
+    theme(
+    plot.margin = margin(2.5, 1, 0, 1, "cm"),     # Adjust margins
+    aspect.ratio = 1,                           # Square plot (optional)
+    legend.position = "bottom"
+  )  +  guides(
+    fill = guide_legend(
+      override.aes = list(size = 4)),
+    color = guide_legend(
+      override.aes = list(size = 4)),
+    alpha = guide_legend(
+      override.aes = list(size = 4)) # Set size of legend bullet points
+    ) -> tree5
+
+tree5
+ggsave(plot = tree5, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_circ_4apr25.png",
+       width = 45,
+       height = 20,
+       dpi = 300,
+       units = "cm"
+       )
+
+# Settings for linear version
+tree4 +
+  scale_x_continuous(
+    limits = c(-1.5, 3.5)) +
+  scale_y_continuous(
+    limits = c(-10, 290))-> tree_linear
+
+ggsave(plot = tree_linear, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_rect.png",
+       width = 8,
+       height = 15,
+       dpi = 600,
+       units = "cm"
+       )
+
+ggsave(plot = tree_linear, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_rect.png",
+       width = 6,
+       height = 14,
+       dpi = 600
+       )
+
+
+```
+
+# PLOT: PhyloTree simple
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+mag_analysis<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_analysis_co_de_24sep24.tsv")
+
+#Plotting variables
+tree_colors<-hcl.colors(n = length(unique(mag_taxonomy$phylum)), palette = "Zissou 1", rev = T)
+tree_colors<-hcl.colors(n = length(unique(mag_taxonomy$phylum)), palette = "Set2", rev = T)
+tree_colors<-hcl.colors(n = length(unique(mag_taxonomy$phylum)), palette = "Dark2", rev = T)
+
+c("#F5191C", "#ED5600", "#E87300", "#E78A05", "#E89D15", "#E9B01D", "#EAC225", "#CECA87", "#B0C590", "#95BE95", "#73B897", "#51B09F", "#37A6A9", "#3B99B1") -> ref
+colorspace::swatchplot(ref,cvd = TRUE)
+
+require(colorspace)
+c(darken("#F5191C", 0.3), "#ED5600", darken("#E2BAD5", 0.3), lighten("#E79C05", 0.3), "salmon", darken("#39A6A9", 0.3), "yellow2", "#CECA87","pink",  "#95BE95", "#C75DAA", "slateblue4", "#37C6A9", lighten("blue", 0.7)) %>% alpha(0.8) -> tree_colors
+
+colorspace::swatchplot(tree_colors,cvd = TRUE)
+
+names(tree_colors)=unique(mag_taxonomy$phylum)
+
+#Export colors
+save(tree_colors, file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/tax/tree_colors_14apr25.RData")
+
+# Sort by abundance for the legend
+mag_taxonomy$phylum %>% table %>% sort(decreasing = T) %>% names -> sorted_phyla
+save(sorted_phyla, file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/tax/phyla_sorted_abundance.RData")
+
+
+
+# Add class
+tree_data %<>% 
+  mutate(
+    phylum = factor(phylum, levels = sorted_phyla), #set the order of the labels
+    class= str_remove(str_extract(taxonomy, "c__[:alnum:]+"), "c__"),
+    genus= (str_extract(taxonomy, "g__[:alnum:]+")),
+    family= (str_extract(taxonomy, "f__[:alnum:]+")),
+         )
+#Plot tree
+ggtree(tree_data, layout="fan", open.angle=0, size = 0.2) +
+  theme(legend.position = "none", plot.margin = unit(pm, "cm")) +
+    scale_color_manual(
+    values = tree_colors[1:length(unique(mag_taxonomy$phylum))],
+    na.value = "black") +
+  scale_size_continuous(range = c(0.05, 0.5))-> tree;tree # Base tree
+
+mag_MPSE_norm %>% 
+  as.data.frame %>% 
+  dplyr::select(OTU, RelhellingerBySample, Sample, Group) -> abund
+
+tree1 <- tree  +
+  geom_tippoint(mapping=aes(color=phylum), 
+                   size=1,
+                   show.legend=TRUE) # Colored tips
+
+mag_analysis %>% dplyr::select(OTU, condition_higher_abund) -> diff
+
+require(ggtreeExtra)
+library(ggnewscale)
+tree1 + 
+  geom_fruit(data=diff, geom=geom_tile,
+                  mapping=aes(y=OTU, fill=condition_higher_abund),
+                  color = "grey50", offset = 0.03, pwidth = 0.05,  size = 0, linewidth = 0.1) +
+    scale_fill_manual(values = saltmarsh_colors)-> tree2;tree2 
+
+#add abundance heatmap
+abund %>% group_by(OTU, Group) %>% summarise(mean=mean(RelhellingerBySample)) -> abund_mean
+
+tree2 + 
+  geom_fruit(
+    data=abund_mean, geom=geom_bar,
+    mapping=aes(y=OTU, x=mean, fill= Group),
+    pwidth=0.38, 
+    orientation="y", 
+    stat="identity",
+    color = "black",
+    linewidth = 0.1) -> tree3 # add cumulative abundance
+
+tree3 + 
+    theme(
+    #plot.margin = margin(2.5, 1, 0, 1, "cm"),     # Adjust margins
+    aspect.ratio = 1,                           # Square plot (optional)
+    legend.position = "left"
+  )  +  guides(
+    fill = guide_legend(
+      override.aes = list(size = 4)),
+    color = guide_legend(
+      override.aes = list(size = 4)),
+    alpha = guide_legend(
+      override.aes = list(size = 4)) # Set size of legend bullet points
+    ) -> tree4
+
+ggsave(plot = tree3, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_circ__clean_nolegend_8apr25.png",
+       width = 15,
+       height = 15,
+       dpi = 600,
+       units = "cm"
+       )
+
+ggsave(plot = tree4, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_circ_clean_legend_8apr25.png",
+       width = 15,
+       height = 15,
+       dpi = 600,
+       units = "cm"
+       )
+
+tree3 +
+  geom_tiplab(aes(label=genus),hjust = -0.2, offset = 1, align = TRUE, size = 2, linesize = 0) +
+  geom_tiplab(aes(label=family),hjust = -0.2, offset = 3, align = TRUE, size = 2, linesize = 0.1) +
+  geom_tiplab(aes(label=label),hjust = -0.2, offset = 5, align = TRUE, size = 2, linesize = 0.1)-> tree5
+ggsave(plot = tree5, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_circ__fam_gen_4apr25.png",
+       width = 45,
+       height = 25,
+       dpi = 300,
+       units = "cm"
+       )
+
+```
+
+#---
+# vOTUs
+#PROCESS
+### (1) Preprocess
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+libs<-c("tidyverse", "data.table", "magrittr", "MicrobiotaProcess", "phyloseq"); invisible(lapply(libs, require, character.only = TRUE))
+
+#Import metagenomics mapping data and geNomad and Vcontact taxonomy classification
+vir_map<-
+ fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/coverm/vir_map")
+
+genomad_tax<-
+  fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/genomad/all_merged2_summary/all_merged2_virus_summary.tsv") %>% 
+  dplyr::rename(vOTU="seq_name") %>% 
+  dplyr::select(c(vOTU, taxonomy))
+genomad_tax1<-cbind(genomad_tax$vOTU, str_split(genomad_tax$taxonomy, ";", simplify = TRUE)) %>%
+  data.frame 
+# Conform to ICTV's taxonomy: https://ictv.global/taxonomy/visual-browser
+names(genomad_tax1)=c("vOTU", "superkingdom", "realm", "kingdom", "phylum", "class", "order", "family")
+names(genomad_tax1)[-1]=paste0("genomad_", names(genomad_tax1)[-1])
+
+#Fix virorter's IDs
+genomad_tax1 %<>%
+  mutate(vOTU=str_replace(vOTU, "\\|\\|", "_"))
+
+vcontact<-
+  fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/vcontact3/exports/final_assignments.csv")
+
+vcontact %>% 
+  filter(Reference == FALSE) %>% 
+  dplyr::rename(vOTU="GenomeName") %>%
+  dplyr::select(c(vOTU, matches("Prediction"))) -> vcontact_tax
+names(vcontact_tax) = str_remove(names(vcontact_tax), "\\(prediction\\)")
+names(vcontact_tax)[-1]=paste0("vcontact_", names(vcontact_tax)[-1])
+
+# Merge taxonomy annotations
+right_join(genomad_tax1,vcontact_tax, by="vOTU") %>%
+  janitor::clean_names() -> genomad_vcontact_tax
+
+
+# Unify taxonomy
+# Remove all "novel" annotation
+genomad_vcontact_tax %>% mutate(
+  across(everything(), ~ ifelse(str_detect(., pattern="novel|No Realm| No Prediction|Unclassified"), "", .)),
+  across(everything(), ~ ifelse(is.na(.), "", .)),
+)->genomad_vcontact_tax1
+
+# Fill assignment gaps in either tool, as much as possible, prioritise Vcontact
+# Conform to ICTV's taxonomy: https://ictv.global/taxonomy/visual-browser
+genomad_vcontact_tax1 %>%
+  mutate(Realm=      case_when(genomad_realm == "" ~ vcontact_realm,
+                               vcontact_realm == "" ~ genomad_realm,
+                               .default = vcontact_realm), # Realm priority
+         Kingdom=    genomad_kingdom,
+         
+         Phylum=     case_when(genomad_phylum == "" ~ vcontact_phylum,
+                               vcontact_phylum == "" ~ genomad_phylum,
+                               .default = vcontact_phylum), # Phylum priority
+         
+         Class=      case_when(genomad_class == "" ~ vcontact_class,
+                               vcontact_class == "" ~ genomad_class,
+                               .default = vcontact_class), # Class priority
+         
+         Order=      case_when(genomad_order == "" ~ vcontact_order,
+                               vcontact_order == "" ~ genomad_order,
+                               .default = vcontact_order), # Order priority
+         
+         Family=     case_when(genomad_family == "" ~ vcontact_family,
+                               vcontact_family == "" ~ genomad_family,
+                               .default = vcontact_family)) %>% # Family priority
+  
+  dplyr::select(v_otu, Realm, Kingdom, Phylum, Class, Order, Family) %>% 
+  column_to_rownames("v_otu") ->
+  vir_tax
+
+fwrite(vir_tax %>% rownames_to_column("votu"),
+       "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/tax/genomad_vcontact_tax_7sep24.csv")
+
+# Select columns 
+names(vir_map)[grepl("fq.gz", names(vir_map))] %<>% str_replace("1.fq.gz", "vir")
+map_columns<-c(
+  names(vir_map)[grepl("Contig", names(vir_map))], 
+  names(vir_map)[grepl("metaG", names(vir_map))]#, #select metagenomes
+#  names(vir_map)[grepl("vir", names(vir_map))] #select viromes
+  )
+
+vir_map1<-vir_map[,..map_columns]
+
+# Tidy column names
+names(vir_map1) %<>% 
+  str_extract("Nat[:digit:]\\.[:digit:]|Art[:digit:]\\.[:digit:]|Art[:digit:]|Nat[:digit:]")
+
+# Fix for Virsorter-Vcontact || bug
+vir_map1$Contig %<>% str_replace("\\|\\|", "_")
+
+names(vir_map1)[1]="v_otu"
+vir_map1 %<>% column_to_rownames("v_otu")
+
+
+
+# Run only in including viromes
+#names(vir_map1)[str_which(names(vir_map), "vir")]=
+#  paste0("vir_",names(vir_map1)[str_which(names(vir_map), "vir")])
+
+# Extract sample IDs ang groups
+metadata<-data.frame(sample = names(vir_map1),
+                     Group = factor(str_extract(names(vir_map1), "Nat|Art"),
+                                    levels=c("Art", "Nat"), labels = c("Constructed", "Natural"))
+                     ) %>% column_to_rownames("sample")
+
+# Create phyloseq obj and convert it to MPSE
+vir_MPSE = phyloseq(phyloseq::otu_table(as.matrix(vir_map1), taxa_are_rows = TRUE),
+                phyloseq::tax_table(as.matrix(vir_tax)),
+                phyloseq::sample_data(metadata)
+) %>% as.MPSE()
+
+# Set a minimum RPM threshold
+vir_MPSE %<>% mutate(Abundance=
+                       case_when(
+                         Abundance < 3 ~ 0,
+                         Abundance >= 3 ~ Abundance))
+
+# Filter out completely unmapped vOTUs
+vir_MPSE %>%
+  group_by(OTU) %>%
+  summarise(sum=sum(Abundance)) %>% 
+  filter(sum==0) %>% pull(OTU)->unmapped_votus
+
+vir_MPSE %<>% dplyr::filter(!OTU %in% unmapped_votus)
+
+#Hellinger normalization
+vir_MPSE_norm <- 
+  mp_decostand(vir_MPSE, method = "hellinger", .abundance = Abundance)
+
+#Multiply to integer to avoid errors in the alpha-diversity functions, as suggested in https://github.com/YuLab-SMU/MicrobiotaProcess/issues/35
+
+#Find minimum multiplier
+vir_MPSE_norm %<>% mutate(hellinger_int = find_int_multiplier(hellinger))
+
+#Calculate abundance ----
+vir_MPSE_norm %<>%
+  mp_cal_abundance(
+    .abundance = hellinger,
+    force = T,
+    action = "add"
+  )
+
+save(vir_MPSE_norm,
+     file="~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_MPSE_norm_04Oct24.RData"
+     )
+
+#Clean the environment
+rm(list=ls()[-which(ls() %in% keep_obj)])
+```
+
+#REPORT
+## (2) Alpha- and Beta- diversity of vOTUs across saltmarsh types
+vOTU originate from the assembly of 5 metaG Art, 5 metaG Nat, 1+1 vir Art, 1 vir Nat
+
+###  (2) Beta visualisation
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+#Import data
+vir_MPSE_norm1<-vir_MPSE_norm
+
+#Add sample type information
+vir_MPSE_norm1 %<>% mutate(OTU_origin=str_extract(OTU, "metag|vir"))
+
+#Calculate alpha indexes ---- 
+vir_MPSE_norm1 %<>% mp_cal_alpha(.abundance=hellinger_int, force = T)
+
+#Calculate Bray-curtis distance between samples ----
+vir_MPSE_norm1 %<>% mp_cal_dist(.abundance=hellinger, distmethod="bray")
+vir_MPSE_norm1 %<>% mp_cal_pcoa(.abundance=hellinger, distmethod="bray")
+
+#PCoA Analysis ----
+vir_MPSE_norm1 %>%
+  mp_plot_ord(
+    .ord = pcoa, 
+    .group = Group, 
+    .color = Group, 
+    .size = Observe, 
+    .alpha = Shannon,
+    ellipse = TRUE,
+    show.legend = FALSE, # don't display the legend of stat_ellipse 
+    show.sample = FALSE
+  ) +
+  scale_fill_manual(
+    values = saltmarsh_colors,
+    guide = guide_legend(keywidth=0.6, keyheight=0.6, label.theme=element_text(size=6.5))
+  ) +
+  scale_color_manual(
+    values= saltmarsh_colors,
+    guide = guide_legend(keywidth=0.6, keyheight=0.6, label.theme=element_text(size=6.5))
+  ) +
+  scale_size_continuous(
+    range=c(1, 3),
+    guide = guide_legend(keywidth=0.6, keyheight=0.6, label.theme=element_text(size=6.5))
+  ) +
+  scale_alpha_continuous(
+    range=c(0.5, 1),
+    guide = guide_legend(keywidth=0.6, keyheight=0.6, label.theme=element_text(size=6.5))
+  ) +
+  labs(size = "Observed")-> beta_vir
+
+ggsave(plot = beta_vir, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/presentations/bray_curtis_pcoa_vir.png", scale = 1, width = 6, height = 4, units = "in")
+
+# Check significance of ordination
+vir_MPSE_norm1 %<>% mp_adonis(
+.abundance = hellinger,
+.formula = ~ Group,
+distmethod = "bray",
+permutation = 9999,
+action = "add"
+)
+# Extract results
+vir_MPSE_norm1 %>% mp_extract_internal_attr(name = adonis) %>% mp_fortify()
+
+```
+
+###  (2) Alpha visualisation
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+
+vir_MPSE_norm1@colData %>% data.frame %>% dplyr::select(Observe, Shannon, Pielou, Group)->vir_alpha
+
+ggstatsplot::ggbetweenstats(vir_alpha, Group, Observe, title = "Observed",
+               xlab = "", ylab = "", bf.message = F, results.subtitle = T,
+               violin.args = list(width = 0.5, alpha = 0, na.rm = TRUE, color = NA)) + 
+  scale_color_manual(values = saltmarsh_colors) +
+  theme(plot.subtitle = element_text(size = 6)) +
+ggstatsplot::ggbetweenstats(vir_alpha, Group, Pielou, title = "Pielou",
+               xlab = "", ylab = "", bf.message = F, results.subtitle = T,
+               violin.args = list(width = 0.5, alpha = 0, na.rm = TRUE, color = NA)) + 
+  scale_color_manual(values = saltmarsh_colors) +
+  theme(plot.subtitle = element_text(size = 6)) +
+ggstatsplot::ggbetweenstats(vir_alpha, Group, Shannon, title = "Shannon's H",
+               xlab = "", ylab = "", bf.message = F, results.subtitle = T,
+               violin.args = list(width = 0.5, alpha = 0, na.rm = TRUE, color = NA)) +
+  scale_color_manual(values = saltmarsh_colors) +
+  theme(plot.subtitle = element_text(size = 6)) -> gg_vir_alpha
+
+ggsave(plot = gg_vir_alpha, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/presentations/vir_alpha.png", scale = 1, width = 10, height = 4, units = "in", dpi = 600)
+
+```
+
+### (2) Alpha summary
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+vir_alpha %>% group_by(Group) %>%
+  summarise (mean=mean(Observe)) %>% 
+  pivot_wider(names_from = Group, values_from = mean) %>%
+  mutate(log2FC=log(Constructed/Natural, base = 2))
+
+vir_alpha %>% group_by(Group) %>%
+  summarise (mean=mean(Pielou)) %>% 
+  pivot_wider(names_from = Group, values_from = mean) %>%
+  mutate(log2FC=log(Constructed/Natural, base = 2))
+
+vir_alpha %>% group_by(Group) %>%
+  summarise (mean=mean(Pielou)) %>% 
+  pivot_wider(names_from = Group, values_from = mean) %>%
+  mutate(log2FC=log(Constructed/Natural, base = 2))
+
+```
+## (3) Differential abundance of vOTUs
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+require(caret)
+require(MASS)
+require(ggtreeExtra)
+require(tidyverse)
+require(data.table)
+
+vir_rel_abund<-vir_MPSE_norm %>% 
+  dplyr::select(OTU, Sample, Group, RelhellingerBySample) 
+
+#Make wide dataset
+vir_rel_abund %>% 
+    pivot_wider(names_from = OTU,
+                values_from = RelhellingerBySample)-> vir_rel_abund_w
+
+vir_rel_abund_w %>% dplyr::select(!Sample)->vir_rel_abund_wg
+
+#Univariate analysis ----
+#t.test / wilcox ----
+vir_rel_abund %>%
+  group_by(OTU) %>% 
+  mutate(shapiro = shapiro.test(RelhellingerBySample)$p.value) %>%
+  summarise(
+    shapiro = unique(shapiro),
+    t_test = broom::tidy(t.test(RelhellingerBySample ~ Group))$p.value,
+    wilcox_test = broom::tidy(wilcox.test(RelhellingerBySample ~ Group))$p.value,
+    .groups = 'drop') %>% 
+  mutate(
+    test_pval=
+     case_when(
+     shapiro<0.05 ~ wilcox_test,
+     shapiro>=0.05 ~ t_test))->vir_univariate
+vir_univariate %>% filter(test_pval<=0.05) %>% pull(OTU) -> sig_vOTUs
+
+#Multivariate analysis ----
+#LDA - Linear Discriminant Analysis !! on the significant features !!
+# Split the data into training (80%) and test set (20%)
+
+set.seed(666)
+training.samples <- vir_rel_abund_wg$Group %>%
+  createDataPartition(p = 0.8, list = FALSE)
+
+train.data <- vir_rel_abund_wg[training.samples, c("Group", sig_vOTUs)] 
+test.data <- vir_rel_abund_wg[-training.samples, c("Group",sig_vOTUs)]
+
+# Estimate preprocessing parameters
+preproc.param <- train.data %>% 
+  preProcess(method = c("center", "scale")) #Scale and center data
+
+# Transform the data using the estimated parameters
+train.transformed <- preproc.param %>% predict(train.data)
+test.transformed <-  preproc.param %>% predict(test.data)
+
+# Fit the model
+model <- lda(Group~., train.transformed)
+
+# Make prediction
+predictions <- model %>% predict(test.transformed) %>% data.frame
+
+# Test prediction, 1 = perfect
+mean(predictions$class==test.transformed$Group)
+
+#Extract model information (group center of gravity, linear discriminants)
+model$means %>% t %>% data.frame()-> vir_LDA_mean
+vir_LDA_mean[rownames(model$scaling),] %>% 
+  add_column(Coefficient=model$scaling) %>% rownames_to_column("OTU") %>% data.table -> vir_LDA_coeff
+names(vir_LDA_coeff)=c("OTU", "LDA_mean_Art", "LDA_mean_Nat", "LDA_Coefficient")
+
+#Merge univariate and multivariate results
+vir_rel_abund %>%
+  group_by(OTU, Group) %>%
+  summarise(mean=mean(RelhellingerBySample),
+            ) %>% pivot_wider(values_from = mean, names_from = Group) %>%
+  mutate(vir_mean = mean(c(Constructed, Natural)))-> vir_means
+names(vir_means)=c("OTU" ,"mean_vir_abund_Con", "mean_vir_abund_Nat", "mean_vir_all")
+
+vir_diff<-merge(
+  vir_means,
+  full_join(vir_univariate, vir_LDA_coeff, by = "OTU")) %>%
+  mutate(log_pval=log(test_pval), .after="test_pval") %>%
+  mutate(
+    LDA_decision=
+           case_when(
+             LDA_Coefficient > 0 ~ "Natural",
+             LDA_Coefficient < 0 ~ "Constructed", 
+             .default = "ns"))
+vir_diff %<>%
+  mutate(condition_higher_abund = 
+           case_when(test_pval<=0.05 & mean_vir_abund_Con>mean_vir_abund_Nat ~ "Constructed",
+                     test_pval<=0.05 & mean_vir_abund_Con<mean_vir_abund_Nat ~ "Natural",
+                     .default = "ns"))
+rownames(vir_diff)=vir_diff$OTU
+
+fwrite(vir_diff, 
+       "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_diff_3jan25.csv")
+
+#Clean environment
+rm(list=ls()[-which(ls() %in% keep_obj)])
+```
+
+## (5) Gene-sharing network
+### vir_analysis starts here!
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval = TRUE}
+require(igraph)
+require(RCy3)
+
+#Import Vcontact3 nodes and edges
+jsonlite::fromJSON("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/vcontact3/exports/cytoscape/graph.cyjs")->vcontact
+
+vcontact$elements$edges %>% data.table->vcontact_edges
+names(vcontact_edges) %<>% str_remove("data.")
+
+vcontact$elements$nodes %>% data.table %>% janitor::clean_names()->vcontact_nodes
+names(vcontact_nodes) %<>% str_remove("data_")
+
+# Import differential abundance data 
+vir_diff<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_diff_3jan25.csv")
+
+# Import geNomad, virsorter, CheckV summaries
+vir_qual<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/Rtables/genomad_virsorter_checkv_filtered.csv") %>%
+  mutate(seq_name=str_replace(seq_name, "\\|\\|", "_")) %>%
+  filter(seq_name %in% vir_map$Contig)
+
+# Import taxonomy
+vir_tax<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/tax/genomad_vcontact_tax_7sep24.csv")
+
+#Import MAG-vOTU data 
+iphop_mags<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/iphop_mags_vOTUs/Host_prediction_to_genome_m90.csv") %>% janitor::clean_names()
+iphop_mags %>% filter(grepl("art|nat", host_genome))
+
+# Integrate Genomad, Virsorter and CheckV data
+full_join(
+  vcontact_nodes %>% dplyr::rename(votu=genome_name),
+  vir_qual %>% dplyr::rename(votu=seq_name),
+  by="votu")->vcontact_nodes_gn_vs_cv_votu
+
+# Integrate relative abundance and differential abundance
+full_join(
+  by="votu",
+  vcontact_nodes_gn_vs_cv_votu,
+  vir_diff %>% 
+    rename(votu=OTU) %>% 
+    dplyr::select(
+      votu, mean_vir_abund_Con,
+      mean_vir_abund_Nat,mean_vir_all,
+      LDA_decision,
+      condition_higher_abund)) -> vcontact_nodes_gn_vs_cv_votu_diff
+
+# Integrate taxonomy
+full_join(
+  by="votu",
+  vir_tax,
+  vcontact_nodes_gn_vs_cv_votu_diff,
+  ) -> vcontact_nodes_gn_vs_cv_votu_diff_tax
+
+# Set Class colors
+load(file = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/virus_class_colors.RData")
+
+#Correct colors
+virus_class_colors[names(virus_class_colors) == ""] = "white"
+virus_class_colors["Caudoviricetes"] = "#6CAA9F"
+virus_class_colors["Arfiviricetes"] = "olivedrab1"
+virus_class_colors["Quintoviricetes"] = "orange"
+virus_class_colors["Megaviricetes"] = "red"
+virus_class_colors["Faserviricetes|Huolimaviricetes|Malgrandaviricetes"] = "yellow"
+virus_class_colors["Malgrandaviricetes"] = "mediumpurple1"
+virus_class_colors["Laserviricetes|Tectiliviricetes"] = "cyan"
+
+#Add alpha
+virus_class_colors=alpha(virus_class_colors, 0.7)
+
+# Check new colors
+colorspace::swatchplot(virus_class_colors, cvd = TRUE)
+
+# Set Class colors
+save(virus_class_colors, file = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/virus_class_colors_tapr25.RData")
+
+vcontact_nodes_gn_vs_cv_votu_diff_tax %<>%
+  mutate(class_colors=factor(Class, levels = names(virus_class_colors), labels = virus_class_colors))
+
+# Integrate host taxonomy prediction
+iphop_mags %>% 
+  group_by(virus) %>%
+  summarise(host_genome=paste0(host_genome, collapse = ";"),
+            host_taxonomy=paste0(host_taxonomy, collapse = ";"),
+            main_method=paste0(main_method, collapse = ";")
+            ) %>% rename(votu=virus) %>%
+  mutate(mag_interaction=
+           case_when(grepl("SemiBin", host_genome) ~ host_genome),
+         #host_class= sapply(str_extract_all(host_taxonomy, "c__[:alpha:]+"),unique)
+         )->iphop_mags_nested
+         
+left_join(vcontact_nodes_gn_vs_cv_votu_diff_tax,iphop_mags_nested) -> 
+  vcontact_nodes_gn_vs_cv_votu_diff_tax_hosts
+
+vir_nodes<-vcontact_nodes_gn_vs_cv_votu_diff_tax_hosts
+
+#Check duplicates
+votu_duplicates<-duplicated(vir_nodes$votu)
+duplicated_id<-vir_nodes[votu_duplicates,"id"]
+vir_nodes[which(id %in% duplicated_id)] 
+
+# Set vcontact ids as rownames
+rownames(vir_nodes)=vir_nodes$id
+vir_nodes %<>% dplyr::relocate(id, .before = "votu")
+
+# Remove unmapped entries in the edge table
+vcontact_edges %>% 
+ filter(source %in% vir_nodes$id & target %in% vir_nodes$id)
+
+
+# Build vcontact network (vcn)
+vcn<-vcontact_edges %>% 
+  igraph::graph_from_data_frame(directed = F, vertices = vir_nodes)
+
+vcn_analysis<-igraph::vertex_attr(vcn) %>% data.frame
+
+# Add network properties
+
+#Calculate degree
+V(vcn)$degree=igraph::degree(vcn)
+
+# Define clusters of connected vOTUs (including reference)
+V(vcn)$vcontact_cluster=paste0("C",components(vcn)$membership)
+
+# Eliminate reference viruses
+vir_nodes_noref_ids = 
+  vir_nodes %>% filter(votu %in% vir_diff$OTU) %>% pull(id)
+
+vcn_noref <- induced_subgraph(vcn, vir_nodes_noref_ids)
+
+# Define clusters of connected vOTUs (without reference)
+V(vcn_noref)$vOTU_only_cluster=paste0("C",components(vcn_noref)$membership)
+vir_analysis<-igraph::vertex_attr(vcn_noref) %>% 
+  data.frame %>%
+  dplyr::select(-name) %>% 
+  filter(votu %in% vir_diff$OTU)
+
+# Export vir_analysis
+fwrite(vir_analysis, "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_analysis_10apr25.csv")
+
+# Export network as R object
+save(vcn_noref, file="/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/Cytoscape/vcn_noref.Rdata")
+
+#Plot in cytoscape
+#job::job({createNetworkFromIgraph(vcn_noref,"vcontact3_24jan25")})
+
+#Clean environment
+#rm(list=ls()[-which(ls() %in% keep_obj)])
+
+```
+### Fig 3: GRAPH: vContact3 degree 1
+```{r eval=FALSE, echo=FALSE, message=FALSE, warning=FALSE, results='show'}
+require(igraph)
+data.table(
+  node=V(vcn_noref),
+  deg = igraph::degree(vcn_noref)) %>% 
+  filter(deg>=1) %>% 
+  pull(node)-> sel
+
+g <- induced_subgraph(vcn_noref, sel)
+g %>% igraph::edge_attr() %>% names
+g %>% igraph::vertex_attr() %>% names
+E(g)$weight = as.numeric(E(g)$weight)
+E(g)$color = rep("gray90",length(E(g)))
+V(g)$size=1+(V(g)$mean_vir_all*50)
+V(g)$color=V(g)$class_colors
+
+
+{
+#layout_with_graphopt(g,
+#                     charge = 0.001,
+#                     spring.constant = 0.4,#0.8,
+#                     spring.length = 1,
+#                     mass = 10,
+#                     niter = 2000
+#                     ) -> l
+  
+#Save layout for consistency
+  
+#save(l, 
+#     file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/vcontact_net_vir_layout_7apr25.RData")
+
+#Load layout for consistency  
+load(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/vcontact_net_vir_layout_7apr25.RData")
+png(filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/vcontact_net_deg1_7apr25.png",
+    width = 20, height = 30, res = 600, units = "cm")
+#par(mai = unit(c(19, 19, 19, 19), "cm"))
+plot(g,
+     layout = l*1.5,
+     vertex.label=NA)
+
+# Add a size legend
+size_legend_values <- c(min(V(g)$size), mean(V(g)$size), max(V(g)$size))
+size_legend_labels <- round(c(min(V(g)$mean_vir_all), mean(V(g)$mean_vir_all), max(V(g)$mean_vir_all)), 2)
+legend(
+  "topright", 
+  legend = size_legend_labels, 
+  pt.cex = size_legend_values / max(size_legend_values) * 2,  # Scale legend point sizes
+  pch = 21, 
+  pt.bg = "black", 
+  bty = "n", 
+  title = "Vertex Size"
+)
+
+legend(
+  "bottom", 
+  legend = names(virus_class_colors[unique(V(g)$Class)[-4]]),
+  col = virus_class_colors[unique(V(g)$Class)[-4]],
+  y.intersp = 1,
+  ncol = 1,
+  pt.cex = 2,  # Scale legend point sizes
+  pch = 16, 
+  #pt.bg = "black", 
+  bty = "n", 
+  title = "vOTU Class",inset = c(0, 0.8)
+)
+
+dev.off()
+}
+#vir_analysis 
+```
+### Fig 3: GRAPH: vContact3 degree 1 AUX
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+vir_analysis_aux<-fread(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_analysis_aux_7apr25.csv")
+
+require(igraph)
+data.table(
+  node=V(vcn_noref),
+  deg = igraph::degree(vcn_noref)) %>% 
+  filter(deg>=1) %>% 
+  pull(node)-> sel
+
+g <- induced_subgraph(vcn_noref, sel)
+g %>% igraph::edge_attr() %>% names
+g %>% igraph::vertex_attr() %>% names
+E(g)$weight = as.numeric(E(g)$weight)
+E(g)$color = rep("gray90",length(E(g)))
+V(g)$size=1+(V(g)$mean_vir_all*50)
+V(g)$aux=vir_analysis_aux[match(V(g)$votu, votu), aux_genes]
+
+# Select the metabolic genes 
+V(g)$aux2=str_extract(V(g)$aux,
+"Galactose-3-O-sulfotransferase|phosphoadenosine phosphosulfate reductase|galactosyl transferase|2OG\\-Fe\\(II\\) oxygenase|porphyrin biosynthesis|methylamine utilization|cysteine dioxygenase|phosphoheptose isomerase|ferredoxin|gamma-glutamyl cyclotransferase|L-glutamine-D-fructose-6-phosphate aminotransferase|enoyl-CoA hydratase\\/carnithine racemase-like|cobalamin biosynthesis protein|phosphofructokinase") %>% unlist
+  
+vertex_colors= factor(
+  x=V(g)$aux2,
+  levels = unique(V(g)$aux2),
+  labels = hcl.colors(n=length(unique(V(g)$aux2))-1, palette = "Zissou 1"))
+
+V(g)$color=as.character(vertex_colors)
+
+# Check colors
+colorspace::swatchplot(levels(vertex_colors), cvd = TRUE)
+
+#Load layout for consistency  
+load(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/vcontact_net_vir_layout_7apr25.RData")
+
+{
+
+png(filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/vcontact_net_deg1_aux.png",
+    width = 20, height = 40, res = 600, units = "cm")
+#par(mai = unit(c(19, 19, 19, 19), "cm"))
+plot(g,
+     layout = l*1.5, # Recycle the layout of the taxonoym graph
+     vertex.label=NA)
+
+# Add a size legend
+size_legend_values <- c(min(V(g)$size), mean(V(g)$size), max(V(g)$size))
+size_legend_labels <- round(c(min(V(g)$mean_vir_all), mean(V(g)$mean_vir_all), max(V(g)$mean_vir_all)), 2)
+legend(
+  "topright", 
+  legend = size_legend_labels, 
+  pt.cex = size_legend_values / max(size_legend_values) * 2,  # Scale legend point sizes
+  pch = 21, 
+  pt.bg = "black", 
+  bty = "n", 
+  title = "Vertex Size"
+)
+
+legend(
+  "bottom", 
+  legend = unique(V(g)$aux2)[-1],
+  col = levels(vertex_colors),
+  y.intersp = 0.9,
+  ncol = 1,
+  pt.cex = 2,  # Scale legend point sizes
+  pch = 16, 
+  #pt.bg = "black", 
+  bty = "n", 
+  title = "AUX/OTH gene",inset = c(0, 0.8)
+)
+
+dev.off()
+}
+#vir_analysis 
+```
+
+### Fig 3: GRAPH: vContact3 degree 1 cluster with reference
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+vir_analysis<-fread(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_analysis_10apr25.csv")
+
+require(igraph)
+data.table(
+  node=V(vcn_noref),
+  deg = igraph::degree(vcn_noref)) %>% 
+  filter(deg>=1) %>% 
+  pull(node)-> sel
+
+g <- induced_subgraph(vcn_noref, sel)
+g %>% igraph::edge_attr() %>% names
+g %>% igraph::vertex_attr() %>% names
+E(g)$weight = as.numeric(E(g)$weight)
+E(g)$color = rep("gray90",length(E(g)))
+V(g)$size=1+(V(g)$mean_vir_all*50)
+
+V(g)$cluster=vir_analysis[match(V(g)$votu, votu), vcontact_cluster]
+
+vertex_colors= factor(
+  V(g)$cluster,
+  levels = unique(V(g)$cluster),
+  labels= hcl.colors(n = length(unique(V(g)$cluster)), palette = "Set3")
+  )
+V(g)$color=as.character(vertex_colors)
+
+# Check colors
+#Load layout for consistency  
+load(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/vcontact_net_vir_layout_7apr25.RData")
+
+{
+
+png(filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/vcontact_net_deg1_vcontact_clusters.png",
+    width = 20, height = 40, res = 600, units = "cm")
+#par(mai = unit(c(19, 19, 19, 19), "cm"))
+plot(g,
+     layout = l*1.5, # Recycle the layout of the taxonoym graph
+     vertex.label=NA)
+
+# Add a size legend
+size_legend_values <- c(min(V(g)$size), mean(V(g)$size), max(V(g)$size))
+size_legend_labels <- round(c(min(V(g)$mean_vir_all), mean(V(g)$mean_vir_all), max(V(g)$mean_vir_all)), 2)
+legend(
+  "topright", 
+  legend = size_legend_labels, 
+  pt.cex = size_legend_values / max(size_legend_values) * 2,  # Scale legend point sizes
+  pch = 21, 
+  pt.bg = "black", 
+  bty = "n", 
+  title = "Vertex Size"
+)
+
+legend(
+  "bottom", 
+  legend = unique(V(g)$cluster),
+  col = levels(vertex_colors),
+  y.intersp = 0.9,
+  ncol = 1,
+  pt.cex = 2,  # Scale legend point sizes
+  pch = 16, 
+  #pt.bg = "black", 
+  bty = "n", 
+  title = "Cluster",inset = c(0, 0.8)
+)
+
+dev.off()
+}
+#vir_analysis 
+```
+
+### Fig 3: GRAPH: vContact3 degree 1 cluster without reference
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+vir_analysis<-fread(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_analysis_10apr25.csv")
+
+require(igraph)
+data.table(
+  node=V(vcn_noref),
+  deg = igraph::degree(vcn_noref)) %>% 
+  filter(deg>=1) %>% 
+  pull(node)-> sel
+
+g <- induced_subgraph(vcn_noref, sel)
+g %>% igraph::edge_attr() %>% names
+g %>% igraph::vertex_attr() %>% names
+E(g)$weight = as.numeric(E(g)$weight)
+E(g)$color = rep("gray90",length(E(g)))
+V(g)$size=1+(V(g)$mean_vir_all*50)
+
+V(g)$cluster=vir_analysis[match(V(g)$votu, votu), vOTU_only_cluster]
+
+vertex_colors= factor(
+  V(g)$cluster,
+  levels = unique(V(g)$cluster),
+  labels= hcl.colors(n = length(unique(V(g)$cluster)), palette = "Set3")
+  )
+V(g)$color=as.character(vertex_colors)
+
+# Check colors
+#Load layout for consistency  
+load(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/vcontact_net_vir_layout_7apr25.RData")
+
+{
+
+png(filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/vcontact_net_deg1_vOTU_only_clusters.png",
+    width = 20, height = 40, res = 600, units = "cm")
+#par(mai = unit(c(19, 19, 19, 19), "cm"))
+plot(g,
+     layout = l*1.5, # Recycle the layout of the taxonoym graph
+     vertex.label=NA)
+
+# Add a size legend
+size_legend_values <- c(min(V(g)$size), mean(V(g)$size), max(V(g)$size))
+size_legend_labels <- round(c(min(V(g)$mean_vir_all), mean(V(g)$mean_vir_all), max(V(g)$mean_vir_all)), 2)
+legend(
+  "topright", 
+  legend = size_legend_labels, 
+  pt.cex = size_legend_values / max(size_legend_values) * 2,  # Scale legend point sizes
+  pch = 21, 
+  pt.bg = "black", 
+  bty = "n", 
+  title = "Vertex Size"
+)
+
+legend(
+  "bottom", 
+  legend = unique(V(g)$cluster),
+  col = levels(vertex_colors),
+  y.intersp = 0.9,
+  ncol = 1,
+  pt.cex = 2,  # Scale legend point sizes
+  pch = 16, 
+  #pt.bg = "black", 
+  bty = "n", 
+  title = "Cluster",inset = c(0, 0.8)
+)
+
+dev.off()
+}
+#vir_analysis 
+```
+
+
+### Define taxonomy Class colors
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+#virus_class_colors <- sample(hcl.colors(n = length(unique(vir_analysis$Class)), palette = "Earth", rev = T))
+#names(virus_class_colors) = unique(vir_analysis$Class)
+virus_class_colors
+scales::show_col(virus_class_colors,ncol = 3)
+#swatchplot(virus_class_colors, cvd =T)
+save(virus_class_colors,file = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/virus_class_colors.RData")
+```
+
+### Double check genomas and virsorter quality of vOTUs
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=T}
+# Import geNomad viruses, remove extra ID annotations
+genomad<-
+  fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/OTU/QC/genomad/all_OTUs_no_doubleBB_summary/all_OTUs_no_doubleBB_virus_summary.tsv") %>%
+  mutate(
+    extra_annot=str_split(seq_name, "\\|", simplify = TRUE)[,2],
+    .after = "seq_name") %>%
+  dplyr::rename(votu=seq_name)
+
+names(genomad)[-1] = paste0("genomad_",names(genomad)[-1])
+
+# Import Virsorter2 viruses, remove extra ID annotations
+virsorter<-
+  fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/OTU/QC/virsorter2/all_OTUs_no_doubleBB_/final-viral-score.tsv") %>%  
+  mutate(
+    seqname=str_split(seqname, "\\|\\|", simplify = TRUE)[,1],
+    .after = "seqname") %>%
+  dplyr::rename(votu=seqname)
+names(virsorter)[-1] = paste0("virsorter_",names(virsorter))[-1]
+
+# Merge datasets
+genomad_virsorter<-full_join(genomad, virsorter, by="votu")
+
+genomad_virsorter %>% dplyr::select(votu, genomad_virus_score, virsorter_max_score, virsorter_viral)
+```
+
+# ---
+# REPORT
+
+### (3) Diff Summary
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+vir_analysis<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_analysis_03jan25.csv")
+
+# Proportion of significantly different vOTUs
+vir_analysis %>%
+  group_by(condition_higher_abund) %>%
+  summarise(n=n()) %>%
+  mutate(prop=n/nrow(filter(vir_diff, test_pval<=0.05))*100)
+
+# Calculate fold change
+vir_diff %<>% filter(condition_higher_abund != "ns") %>%
+  mutate(log2FC=log(mean_vir_abund_Con/mean_vir_abund_Nat, base = 2))
+
+# Check how many vOTUs have a min 2-fold difference
+table(abs(vir_diff$log2FC) > 1)
+```
+
+## General taxonomic distribution of vOTUs
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval = FALSE}
+vir_analysis<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_analysis_10apr25.csv")
+
+vir_analysis %>% 
+  group_by(Realm) %>%
+  summarise(
+    n=n(),
+    prop=n()/nrow(vir_analysis)*100) %>%
+  arrange(prop)
+
+vir_analysis %>% 
+  group_by(Realm, Phylum) %>%
+  summarise(prop=n()/nrow(vir_analysis)*100) %>% arrange(prop)
+
+vir_analysis %>% 
+  group_by(Phylum, Class) %>%
+  summarise(
+    sum=n(),
+    prop=n()/nrow(vir_analysis)*100)  %>% view
+
+vir_analysis %>% 
+  group_by(Family) %>%
+  summarise(
+    sum=n(),
+    prop=n()/nrow(vir_analysis)*100)
+
+
+```
+
+## Cluster size distribution of vOTUs
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_analysis_10apr25.csv") -> vir_analysis
+
+vir_analysis %>% count(vOTU_only_cluster) %>% arrange(desc(n))
+
+ merge(vir_analysis, by="vOTU_only_cluster",
+  vir_analysis %>% 
+    group_by(vOTU_only_cluster) %>% count() %>%
+    mutate(cluster_type = 
+           case_when(n==1 ~ "singleton",
+                     n>1 & n<=10 ~ "small",
+                     n>10 & n<=50 ~ "medium",
+                     n>50 & n<=500 ~ "large",
+                     n>500 ~ "very large")
+         )) %>%
+   mutate(
+     vOTU_only_cluster = case_when(n==1 ~ "singleton", .default = vOTU_only_cluster)
+   ) -> vir_analysis1
+ 
+vir_analysis1$vOTU_only_cluster %>% table %>% sort(decreasing = T)
+ 
+# Compare cluster info with taxonomy
+vir_analysis1[n>1] %>%
+  group_by(Class, vOTU_only_cluster) %>%
+  count() %>% arrange(desc(n)) ->class_cluster_count
+
+vir_analysis1[n>1] %>%
+  group_by(vOTU_only_cluster) %>%
+  count() %>% arrange(desc(n)) %>% 
+  filter(n>=10) -> top_cluster
+
+# Count singletons and clusters
+vir_analysis1 %>%
+  summarise(n_singletons = sum(n==1),
+            n_cls = sum(n>1),
+            )
+
+# Calculate average cluster size
+vir_analysis1[n>1] %>%
+  summarise(median_cls_size=median(n),
+            sd_cls_size=sd(n)
+            )
+
+# Count number of vOTUs by cluster type
+vir_analysis1 %>% group_by(cluster_type) %>% count()
+
+  
+
+
+```
+
+### Export VIR analysis for publishing
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+vir_analysis1 %>% 
+  rowwise %>%
+  mutate(
+    vcontact_tax = 
+      paste(
+        realm_prediction, phylum_prediction,
+        class_prediction, order_prediction,
+        family_prediction, genus_prediction, sep =";")) %>%
+  mutate(
+    mean_vir_abund_Con = round(mean_vir_abund_Con,3),
+    mean_vir_abund_Nat = round(mean_vir_abund_Nat,3)
+    ) -> vir_analysis_nice
+vir_analysis_nice$vcontact_tax
+
+vir_analysis_nice %>% 
+  dplyr::select(votu,
+                Realm, Kingdom, Phylum, Class, Order, Family,
+                host_taxonomy, vOTU_only_cluster,
+                mean_vir_abund_Con, mean_vir_abund_Nat, mean_vir_all, condition_higher_abund,
+                size_kb, checkv_completeness, virsorter_max_score, genomad_virus_score, 
+                genomad_taxonomy, vcontact_tax
+                ) -> vir_analysis_nice2
+  
+vir_analysis_nice2 %>%
+  dplyr::rename(vOTU = votu,
+                "Size (kbp)" = size_kb,
+                "Genomad Virus Score" = genomad_virus_score,
+                "Virsorter Virus Score" = virsorter_max_score,
+                "CheckV Completeness" = checkv_completeness,
+                "Predicted Host Taxonomy" = host_taxonomy,
+                "Average Relative Abundance in Contructed"= mean_vir_abund_Con,
+                "Average Relative Abundance in Natural"= mean_vir_abund_Nat,
+                "Significantly more abundant in:"=condition_higher_abund,
+                "Average Relative Abundance"= mean_vir_all,
+                "Cluster" = vOTU_only_cluster,
+                "Full Genomad taxonomy" = genomad_taxonomy,
+                "Full Vcontact taxonomy" = vcontact_tax
+                ) -> vir_analysis_nice3
+
+fwrite(vir_analysis_nice3, "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/vir_analysis_nice_10apr25_v4.csv",
+       sep = ",", dec = ".")
+```
+
+## vOTU data type distribution
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+vir_diff$OTU %>% str_extract("metag|vir") %>% table
+
+((vir_diff$OTU %>% str_extract("metag|vir") %>% table)/nrow(vir_diff))*100
+```
+
+## Mapped vOTUs
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+nrow(vir_analysis)/nrow(vir_tax)
+```
+
+## Unmapped vOTUs
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+setdiff(
+  rownames(vir_tax),
+  vir_analysis[,votu]
+  ) -> exluded_votus
+
+exluded_votus%>% str_extract(pattern = "metag|vir") %>% table
+vir_tax[exluded_votus,] %>%
+  group_by(Phylum) %>% count(sort = T) %>%
+  ungroup %>%
+  mutate(prop= n/sum(n))
+
+```
+
+
+## Presence-absence of vOTUs 
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+vir_analysis %>%
+  mutate(
+    presence_absence =
+    case_when(
+      (mean_vir_abund_Con == 0 & mean_vir_abund_Nat>0)
+      |
+      (mean_vir_abund_Nat == 0 & mean_vir_abund_Con>0) ~ T, .default = F)
+  ) %>% group_by(condition_higher_abund, presence_absence) %>% count
+```
+# PLOT: Barplots
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+load(
+     file="~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_MPSE_norm_04Oct24.RData"
+     )
+vir_MPSE_norm %>%
+          mp_plot_abundance(
+            .abundance=RelhellingerBySample,
+            .group=Group,
+            taxa.class = Phylum,
+            topn = 20,
+            relative = FALSE,
+            force = T
+          ) -> gg_vir_barplot_phylum
+
+ggsave(plot = gg_mag_barplot_phylum, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/presentations/mag_barplot_phylum.png",
+       width = 10,
+       height = 6,
+       dpi = 600
+       )
+```

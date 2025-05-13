@@ -1,0 +1,1087 @@
+---
+title: "bosc23_network_analysis"
+author: "Riccardo Frizzo"
+date: "2024-08-12"
+output:
+  word_document: default
+  pdf_document: default
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: console
+---
+
+#Init
+```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+libs<-c("data.table", "tidyverse", "foreach", "magrittr","ggtree", "ape")
+invisible(lapply(libs, require, character.only = TRUE))
+
+hcl.colors(n=3, palette ="Zissou 1",alpha = 0.9)
+zy=c("#A5191CE6","#FADB2BE6","#65B59AE6")
+#scales::show_col(zy[c(3,1,2)],ncol = 3)
+saltmarsh_colors = c(Constructed=zy[1], Natural=zy[3], ns = zy[2])
+
+# Load Phylum colors
+load(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/tax/tree_colors_14apr25.RData")
+tree_colors<-c(tree_colors, "firebrick4")
+names(tree_colors)[length(tree_colors)]="Thermoproteota" #Add the archaea :)
+
+
+```
+
+## Preproc MAGs (make mag_analysis)
+### MAG analysis starts here!
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Import taxonomy, relative abundance, differential abundance data
+mag_taxonomy<-data.table::fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/tax/mag_taxonomy_mags99c70c10a99.csv")
+names(mag_taxonomy)[1]="OTU"
+
+# Extrapolate phylogenetic distance
+mag_tree <- ggtree::read.tree("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gtdb220/classify/gtdbtk.backbone.bac120.classify.tree")
+tree_dist_matrix <- ape::cophenetic.phylo(mag_tree)
+mag_dist_mat<-tree_dist_matrix[grepl("art|nat", colnames(tree_dist_matrix)),grepl("art|nat", colnames(tree_dist_matrix))]
+mag_dist_vector <- as.vector(mag_dist_mat[upper.tri(mag_dist_mat)])
+dist(mag_dist_mat) %>% hclust-> tax_hclust
+data.frame(mag=tax_hclust$labels,
+           phylo_dist=tax_hclust$order) %>% rename(OTU=mag)->phylogenetic_distance_hclust
+
+#Import quality data
+mag_qual<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/checkm2_mags/quality_report.tsv")
+names(mag_qual)[1]="OTU"
+
+#Import differential abundance data
+mag_diff<-data.table::fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_diff_mags99c70c10a99.csv")
+
+#Import MPSE analysis
+load("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_MPSE_norm_mags99c70c10a99.RData")
+
+# Make wide abundance dataset for association analysis
+mag_MPSE_norm %>% dplyr::select(OTU, Sample, Group, RelhellingerBySample) %>%  #RelhellingerBySample or Abundance
+  pivot_wider(names_from = OTU,
+              values_from = RelhellingerBySample #RelhellingerBySample or Abundance
+              ) %>% 
+  dplyr::select(!Group) %>% 
+  column_to_rownames("Sample")->mag_abund_w
+
+# Make mag_analysis
+
+mag_taxonomy %>%
+  merge(mag_diff) %>%
+  merge(mag_qual) -> mag_analysis
+
+# Fill empty values in diff analysis
+mag_analysis %<>%
+  mutate(condition_higher_abund = case_when(condition_higher_abund == "" ~ "ns", .default = condition_higher_abund))
+
+# Import phylo_dist
+
+mag_analysis %<>%
+  full_join(phylogenetic_distance_hclust, by = "OTU")
+
+# Export mag_analysis
+fwrite(mag_analysis, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_analysis_17oct24.tsv", sep = "\t", dec = ".")
+
+
+
+```
+
+### Export MAG analysis for publishing
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+names(mag_analysis)
+
+# Prepare a tidy version for printing
+mag_analysis %>% 
+  mutate(
+    mean_mag_abund_Art=round(mean_mag_abund_Art,3),
+    mean_mag_abund_Nat=round(mean_mag_abund_Nat,3),
+    average= round((mean_mag_abund_Nat + mean_mag_abund_Art)/2, 3)) %>%
+  
+  dplyr::select(OTU,
+                Phylum, Class, Order, Family, Genus, Species,
+                mean_mag_abund_Art, mean_mag_abund_Nat, average, condition_higher_abund,
+                Completeness, Contamination, Genome_Size, GC_Content, Total_Coding_Sequences
+                ) %>% 
+  
+  dplyr::rename(
+    "MAG ID" = OTU,
+    "Average Relative Abundance"= average,
+    "Genome Size" = Genome_Size,
+    "GC Content" = GC_Content,
+    "Number of coding sequences" = Total_Coding_Sequences,
+     "Average Relative Abundance in Contructed"= mean_mag_abund_Art,
+     "Average Relative Abundance in Natural"= mean_mag_abund_Nat,
+     "Significantly more abundant in:"= condition_higher_abund
+  ) -> mag_analysis_nice
+
+fwrite(mag_analysis_nice, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/mag_analysis_nice_13jan25.csv",
+       sep = ";", dec = ",")
+
+```
+## Preproc vOTUs (import vir_analysis)
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Import Virus information
+vir_analysis<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_analysis_03jan25.csv")
+
+phold_description<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/pharokka_phold/phold/phold_all_cds_functions.tsv") %>%
+  filter(Contig %in% vir_analysis$votu)
+
+phold_description_w<-phold_description %>%
+pivot_wider(names_from = Description,  values_from = Count)
+
+phold_annot<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/pharokka_phold/phold/phold_per_cds_predictions.tsv") %>%
+  filter(contig_id %in% vir_analysis$votu)
+names(phold_annot)[1]="votu"
+
+pharokka_description<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/pharokka_phold/pharokka_cds_functions.tsv")
+
+pharokka_annot<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/pharokka_phold/pharokka_cds_final_merged_output.tsv")
+
+bakta<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/bakta/all_OTUs_no_doubleBB.tsv")
+names(bakta)[1]="votu"
+bakta %<>%
+  filter(votu %in% vir_analysis$votu)
+
+bakta_hypotheticals<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/bakta/all_OTUs_no_doubleBB.hypotheticals.tsv")
+names(bakta_hypotheticals)[1]="votu"
+bakta_hypotheticals %<>%
+  filter(votu %in% vir_analysis$votu)
+
+```
+# ~~~ MAGs ~~~
+## Differential abundance of MAGs 
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+mag_analysis %>% 
+  group_by(condition_higher_abund) %>%
+  count(sort = T) %>%
+  ungroup %>%
+  mutate(prop=100*n/sum(n))
+```
+
+## Presence-absence of MAGs 
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+mag_analysis %>%
+  mutate(
+    presence_absence =
+    case_when(
+      (mean_mag_abund_Art == 0 & mean_mag_abund_Nat>0)
+      |
+      (mean_mag_abund_Nat == 0 & mean_mag_abund_Art>0) ~ T, .default = F)
+  ) %>% group_by(condition_higher_abund, presence_absence) %>% count
+```
+
+## Phage-defence integrations
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+def_paths<-list.files(
+  path="/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/defensefinder_11set",
+  recursive = T,
+  full.names = T,
+  pattern = "systems.tsv"
+  )
+
+# Loop over the files, add MAG IDs
+fread(def_paths[2])
+foreach(i = def_paths)%do%{
+  fread(i) %>% add_column(OTU=str_extract(i,"[:alpha:]+_SemiBin_[:digit:]+"), .before = "sys_id")
+} %>% rbindlist()->def_sys
+
+#filter the table based on a specific type
+def_sys %>% filter(type == "SoFIC") %>% pull(OTU)->mags_sofi
+```
+
+#----------------------------------------------------------------------
+# ~~~ vOTUs ~~~
+## Size distribution of vOTUs
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+vir_qual<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/Rtables/genomad_virsorter_checkv_filtered.csv") %>%
+  mutate(seq_name=str_replace(seq_name, "\\|\\|", "_")) %>%
+  filter(seq_name %in% vir_analysis$votu)
+
+vir_qual %>% summarise(
+  mean=mean(checkv_contig_length)/1e3,
+  sd=sd(checkv_contig_length)/1e3
+)
+
+# Genome size by Class
+vir_analysis[Class == "Malgrandaviricetes", size_kb] %>% range
+vir_analysis[Class == "Caudoviricetes", size_kb] %>% range
+vir_analysis[Class == "Caudoviricetes", size_kb]  %>% hist
+```
+
+#---
+# Virus functional annotation
+# Import vocabularies 
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+vfdb_vocabulary<-fread("~/rstudio-server/storage16TB/riccardo/tools/phold/vfdb_description_output.csv")
+defencefinder_vocabulary<-fread("~/rstudio-server/storage16TB/riccardo/tools/phold/defensefinder_plddt_over_70_metadata.tsv")
+```
+## Condense phold categories
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+# Count annotated
+phold_description$Description %>% unique
+phold_description %>%
+  filter(!Description %in% c("CDS", "unknown function")) %>%
+  group_by(Contig) %>%
+  summarise(sum_known=sum(Count))-> vir_sum_fun_annot
+
+# Add to phold_description
+phold_description_w %<>%
+  merge(vir_sum_fun_annot)
+
+# Group categories
+phold_description_w %>%
+  mutate(
+    annot_prop=round(sum_known/(sum_known +`unknown function`) ,3),
+    structural= `head and packaging` + tail + connector,
+    DNARNA=`DNA, RNA and nucleotide metabolism`,
+    integration_excision = `integration and excision`,
+    transcription = `transcription regulation`,
+    moron= `moron, auxiliary metabolic gene and host takeover`,
+    unk= `unknown function`) %>% 
+  dplyr::rename(votu=Contig) %>%
+  dplyr::select(votu, 
+                structural, 
+                DNARNA, integration_excision, lysis,
+                transcription,
+                moron,
+                other,
+                unk,
+                annot_prop,
+                CDS
+                )-> phold_annot_summary
+
+phold_annot_summary %>%
+  dplyr::rename("Structural components" = structural,
+                "DNA, RNA, Nucleotide metabolism" = DNARNA,
+                "Integration and excision" = integration_excision,
+                "Lysis" = lysis,
+                "Transcription regulations" = transcription,
+                "Auxiliary genes and host takeover" = moron,
+                "Other" = other,
+                "Unknown" = unk
+                ) ->phold_annot_summary1
+```
+
+## Heatmap: distribution of phold categories across vOTU
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+require(ComplexHeatmap)
+
+#Remove rare classes
+vir_analysis %>%
+  group_by(Class) %>% count %>%
+  filter(n>2) %>% pull(Class) -> not_rare_classes
+
+vir_analysis %>%
+  filter(Class %in% not_rare_classes) %>%
+  pull(votu)->votu_not_rare_classes
+
+#Preapre matrix
+phold_annot_summary1 %>%
+  dplyr::select(-c(annot_prop, CDS)) %>%
+  filter(votu %in% votu_not_rare_classes) %>%
+  column_to_rownames("votu") %>% as.matrix()-> phold_annot_summary_mat
+
+# Transform into presence-absence
+phold_annot_summary_mat[phold_annot_summary_mat>1]=1
+
+# Define column properties
+lev<-colnames(phold_annot_summary_mat)
+
+set.seed(25012025)
+column_col<-
+  structure(
+    sample(hcl.colors(length(unique(lev)), palette = "RdYlGn", alpha = 0.7)),
+    names = unique(lev))
+column_col-> phold_cat_colors
+#colorspace::swatchplot(column_col)
+
+col_annot<-
+  columnAnnotation(
+  "Functional \n Category" = factor(lev, levels = unique(lev)),
+  show_legend = F,
+  col = list("Functional \n Category"=column_col),
+  annotation_name_gp = gpar(fontsize = 10),
+  annotation_name_side = "left"
+  )
+
+lev2=vir_analysis[votu %in% hclust_sorted_votus, Class]
+lev2[lev2 == ""] = "Unknown"
+load(file = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/virus_class_colors.RData")
+names(virus_class_colors)[names(virus_class_colors) == ""] = "Unknown"
+virus_class_colors[names(virus_class_colors) == "Unknown"] = "grey80"
+
+# Set the order of row splits
+ord<-lev2 %>% table %>% sort(decreasing = F) %>% names
+lev2 = factor(lev2,
+              levels = (ord), # by frequency
+              ordered = T
+              )
+
+# Sort the matrix within each Class
+foreach(i = not_rare_classes) %do% {
+  
+  vir_analysis %>%
+    filter(Class == i) %>% pull(votu) -> votu
+  
+  phold_annot_summary_mat[votu,] -> curr_mat
+  
+  curr_mat %>%
+    dist %>% hclust %>% cutree(h=1) %>% sort %>%
+    names -> sorted_votus
+  phold_annot_summary_mat[sorted_votus,] %>% as.data.frame %>%
+    rownames_to_column("votu")
+  
+} %>% rbindlist %>% column_to_rownames("votu") %>% as.matrix -> hclust_sorted_votus_mat
+phold_annot_summary_mat<-hclust_sorted_votus_mat
+
+
+row_col <- structure(
+  virus_class_colors[ord],
+  names = ord
+)
+
+# Create a row annotation object
+row_annot <- rowAnnotation(
+  "vOTU \n Class" = lev2,
+  col=list("vOTU \n Class" = row_col),
+  annotation_name_gp = gpar(fontsize = 10),
+  show_legend = F
+)
+
+phold_annot_summary_mat %>% Heatmap(
+          col=c("white", "lightblue"),
+          show_row_names = FALSE,
+          show_row_dend = FALSE,
+          top_annotation = col_annot,
+          right_annotation = row_annot,
+          cluster_rows = F,       # Row clustering interferes with row_split order
+          cluster_row_slices = F,
+          cluster_columns = F, 
+          column_split = factor(colnames(phold_annot_summary_mat), levels=colnames(phold_annot_summary_mat)),
+          column_title_gp = gpar(fontsize = 12, fontface="bold"),
+          column_title_rot = 45, 
+          row_split = lev2,
+          row_title_gp = gpar(fontsize = 0),
+          row_title_side = "right",
+          row_title_rot = 0,
+          row_names_gp = gpar(fontsize=0),
+          column_names_gp = gpar(fontsize=0),
+          show_heatmap_legend = F,
+          border=F,
+          heatmap_width = unit(17,"cm"),
+          heatmap_height = unit(13,"cm")
+  ) -> hm_vir_phold_desc;
+
+png(filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/heatmap_vir_phold_categories.png",
+    width = 20, height = 21, res = 600, units = "cm")
+draw(hm_vir_phold_desc, heatmap_legend_side = "top")
+dev.off()
+```
+## Heatmap by phold category
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+# Rename `function` column to a more handy name
+phold_annot %>%
+  dplyr::rename(func=`function`) -> phold_annot1
+
+phold_annot1 %>%
+  mutate(func= 
+           case_when(
+             func %in% c("head and packaging", "tail", "connector") ~ "Structural components",
+             func == "moron, auxiliary metabolic gene and host takeover" ~ "Auxiliary genes and host takeover",
+             func == "other" ~ "Other", .default = func)) -> phold_annot2
+
+# Select a category
+for(cur_fun in unique(phold_annot2$func)[c(2,4,5)]) {
+
+# Pick a color
+color=phold_cat_colors[cur_fun]
+
+phold_annot2 %>%
+  filter(func == cur_fun & votu %in% votu_not_rare_classes) %>%
+  group_by(votu, product) %>%
+  count %>%
+  pivot_wider(names_from = product, values_from = n, values_fill = 0) %>%
+  column_to_rownames("votu")-> phold_cat_sum_df
+
+colSums(phold_cat_sum_df) %>% quantile(probs = seq(0,1,0.1)) -> decile
+
+
+#filter out products with less than 10 hits
+phold_cat_sum_df[,colSums(phold_cat_sum_df)>decile["80%"]] -> phold_cat_sum_df_f
+
+#Transform to matrix
+phold_cat_sum_df_f %>% as.matrix -> phold_cat_mat
+phold_cat_mat[phold_cat_mat>0]=1
+
+vir_analysis[votu %in% rownames(phold_cat_mat),Class] %>% unique -> classes
+# Sort the matrix within each Class
+foreach(i = classes) %do% {
+  
+  vir_analysis[votu %in% rownames(phold_cat_mat),] %>%
+    filter(Class == i) %>% pull(votu) -> votu
+  
+  phold_cat_mat[votu,] -> curr_mat
+  
+  curr_mat %>%
+    dist %>% hclust %>% cutree(h=1) %>% sort %>%
+    names -> sorted_votus
+  phold_cat_mat[sorted_votus,] %>% as.data.frame %>%
+    rownames_to_column("votu")
+  
+} %>% rbindlist %>% column_to_rownames("votu") %>% as.matrix -> hclust_sorted_votus_mat
+phold_cat_mat<-hclust_sorted_votus_mat
+
+# Define column titles properties
+lev<-rep(cur_fun, ncol(phold_cat_mat))
+
+column_col<-
+  structure(
+    color,
+    names = cur_fun)
+
+col_annot1<-
+  columnAnnotation(
+  "Gene \n annotation" = factor(lev, levels = unique(cur_fun)),
+  show_legend = F,
+  col = list("Gene \n annotation" = column_col),
+  annotation_name_gp = gpar(fontsize = 0),
+  annotation_name_side = "left")
+
+col_annot2<-
+  columnAnnotation(
+  "Gene count" = anno_barplot(
+    -colSums(phold_cat_mat[,names(sort(colSums(phold_cat_mat), T))]),
+    axis_param = list(
+      at = pretty(-colSums(phold_cat_mat), n=2),  # Adjust axis ticks
+      labels = rev(pretty(colSums(phold_cat_mat), n=2))  # Show positive labels
+      ),
+    ylim=range(pretty(-colSums(phold_cat_mat), n=2))
+    ),
+  show_legend = F)
+
+
+lev2=vir_analysis[votu %in% rownames(phold_cat_mat), Class]
+lev2[lev2 == ""] = "Unknown"
+load(file = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/virus_class_colors.RData")
+names(virus_class_colors)[names(virus_class_colors) == ""] = "Unknown"
+virus_class_colors[names(virus_class_colors) == "Unknown"] = "grey80"
+
+# Set the order of row splits
+ord<-lev2 %>% table %>% sort(decreasing = F) %>% names
+
+lev2 = factor(lev2,
+              levels = ord, # by frequency
+              ordered = T, labels = ord
+              )
+row_col<- 
+  structure(
+    virus_class_colors,
+    names = names(virus_class_colors))
+
+# Create a row annotation object
+row_annot <- rowAnnotation(
+  "vOTU \n Class" = lev2,
+  col=list("vOTU \n Class"=row_col[levels(lev2)]),
+  annotation_name_gp = gpar(fontsize = 10),
+  annotation_name_side="top",
+  annotation_name_rot = 45,
+  show_legend = F
+)
+
+phold_cat_mat[,names(sort(colSums(phold_cat_mat), T))] %>% # order columns by abundace
+  Heatmap(
+          col=c("white", as.character(color)),
+          show_row_names = FALSE,
+          show_row_dend = FALSE,
+          top_annotation = col_annot1,
+          bottom_annotation = col_annot2,
+          right_annotation = row_annot,
+          cluster_rows = F,
+          cluster_row_slices = T,
+          cluster_columns = F,
+          column_split = rep(cur_fun, ncol(phold_cat_mat)),
+          rect_gp = gpar(col = "white", lwd = 0),
+          column_title_gp = gpar(fontsize = 0),
+          column_title_rot = 0, 
+          column_title_side = "bottom",
+          row_split = lev2,
+          row_title_gp = gpar(fontsize = 0),
+          row_title_side = "right",
+          row_title_rot = 0,
+          row_names_gp = gpar(fontsize=0),
+          column_names_gp = gpar(fontsize=10),
+          column_names_rot = 45,
+          show_heatmap_legend = F,
+          border=F,
+          heatmap_width = unit(8+6,"cm"),
+          heatmap_height = unit(18,"cm"),
+          raster_quality = 10
+  ) -> hm_vir_phold_fun
+
+png(filename = 
+      paste0(
+      "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/heatmap_vir_phold_", cur_fun, ".png"),
+    width = 22, height = 20, res = 600, units = "cm", bg = "transparent")
+draw(hm_vir_phold_fun)
+dev.off()
+}
+
+
+```
+
+# Phold stats
+## General
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+# Proportions of CDS assigned to phold categories
+n_cds=sum(phold_description[Description == "CDS",Count])
+phold_description %>%
+  group_by(Description) %>%
+  summarise(
+    sum=sum(Count),
+    prop=round((sum/n_cds)*100,2)     
+            ) %>% arrange(desc(sum))
+
+
+# Distribution of CDS
+phold_annot_summary1$CDS %>% quantile
+phold_annot_summary1$CDS %>% mean
+phold_annot_summary1$CDS %>% sd
+phold_annot_summary1$CDS %>% hist
+
+# Distribution of annotated proportion
+phold_annot_summary1$annot_prop %>% quantile
+phold_annot_summary1$annot_prop %>% mean
+phold_annot_summary1$annot_prop %>% sd
+phold_annot_summary1$annot_pro %>% hist
+
+
+# Distribution of categories across vOTUs
+phold_description %>%
+  group_by(Description) %>%
+  summarise(
+    n=n(),
+    sum=sum(Count>0),
+    prop=round((sum/n)*100, 2)
+            ) %>% arrange(desc(prop))
+
+# Distribution of products across vOTUs
+phold_annot2 %>%
+  group_by(product) %>%
+  summarise(
+    n=n(),
+    prop=round((n/nrow(phold_annot2))*100, 2)
+            ) %>% arrange(desc(prop)) %>% print(n = 50)
+
+```
+
+## Structural components
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+phold_annot2 %>% 
+  filter(func == "Structural components") -> struc
+
+struc %>%
+  count(product) %>% 
+  mutate(percentile_group = ntile(n, 10)) %>%
+  arrange(desc(n)) %>% view
+
+phold_annot_summary1 %>%
+  summarise(
+    n=n(),
+    sum = sum(`Structural components`>0),
+    prop=round((sum/n)*100, 2)
+            ) %>% arrange(desc(prop))
+```
+
+## DNARNA
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+phold_annot2 %>% 
+  filter(func == "DNA, RNA and nucleotide metabolism") -> dnarna
+
+dnarna %>%
+  count(product) %>% 
+  mutate(percentile_group = ntile(n, 10)) %>%
+  arrange(desc(n)) %>% view
+```
+
+## Moron and auxiliary
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+phold_annot2 %>% 
+  filter(func == "Auxiliary genes and host takeover") -> aux
+
+aux %>%
+  count(product) %>% 
+  mutate(percentile_group = ntile(n, 10)) %>%
+  arrange(desc(n)) %>% view
+
+# Expand VFDB annotations
+aux %>% 
+  dplyr::select(votu, cds_id, product, tophit_protein) %>%
+  filter(product == "VFDB virulence factor protein") %>%
+  dplyr::rename(prot_id=tophit_protein) %>% merge(vfdb_vocabulary, by="prot_id") -> aux_vfdb
+
+aux_vfdb %>% 
+  group_by(vf_category, description) %>% 
+  count -> aux_vfdb_count
+
+# Expand DefenceFinder annotations
+aux %>% 
+  dplyr::select(votu, cds_id, product, tophit_protein) %>%
+  filter(product == "DefenseFinder protein") %>%
+  mutate(id = parse_number(str_extract(tophit_protein, "_[:digit:]+$"))) %>% 
+  merge(defencefinder_vocabulary, by="id") -> aux_defencefinder
+
+
+aux_defencefinder %>% 
+  group_by(gene_name) %>% 
+  count -> aux_defencefinder_count
+```
+## Other
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+phold_annot2 %>% 
+  filter(func == "Other") -> other
+
+other %>%
+  count(product) %>% 
+  mutate(percentile_group = ntile(n, 10)) %>%
+  arrange(desc(n)) %>% view
+```
+
+## Supplementary 5: Virus gene annotations
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+require(openxlsx)
+wb <- createWorkbook()
+phold_annot_summary1
+addWorksheet(wb, "Table 1")
+writeData(wb, "Table 1", phold_annot_summary1)
+"Gene Counts by vOTUs and Functional category"
+
+funcs<-unique(phold_annot2$func)[-1]
+for (i in 1:length(funcs)){
+phold_annot2 %>%
+  filter(func == funcs[i]) %>%
+  group_by(func, product) %>% 
+  count %>% arrange(desc(n)) %>% 
+  dplyr::select(product, n) %>%
+  dplyr::rename(
+    "Function" = func,
+    "Gene annotation" = product,
+    "Gene count" = n
+                ) -> gene_counts
+  
+  phold_annot2 %>%
+  filter(func == funcs[i]) %>%
+  group_by(func, product) %>% 
+  summarise(n=sum(length(unique(votu)))) %>%   
+    dplyr::rename(
+      "Function" = func,
+      "Gene annotation" = product,
+      "Number of vOTU" = n) -> votu_counts
+  
+  sel<-merge(gene_counts, votu_counts, by = c("Gene annotation", "Function")) %>%
+    relocate("Function", .before = "Gene annotation")
+  
+  addWorksheet(wb, paste0("Table ", 1+i))
+  writeData(wb, paste0("Table ", 1+i), sel)
+}
+
+saveWorkbook(wb,
+             "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/Supplementary File 8 - Virus gene annotation_v2.xlsx",
+             overwrite = F)
+```
+
+# Utils
+## Exctract gene sequences by name
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+phold_annot2 %>% count(product) %>% arrange(desc(n)) %>% view
+gene<-"VFDB virulence factor protein"
+phold_annot2 %>% filter(product == gene) %>% 
+  mutate(seq_id=paste0(votu, ":", cds_id))-> phold_selected_gene
+
+#Select vOTUs
+phold_selected_gene %>% pull(seq_id) %>% unique -> seq_ids
+
+# Load auxiliary genes
+Biostrings::readAAStringSet(
+  filepath = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/pharokka_phold/phold/phold_moron_other_aa.fasta",format = "fasta") -> aux.fna
+
+names(aux.fna)
+aux.fna[names(aux.fna) %in% seq_ids] -> selected_votus_fna
+
+selected_votus_fna[1] %>% as.character
+
+```
+
+## Select votus by auxiliary genes
+```{r, echo = TRUE, warning=FALSE, message=FALSE, results='show'}
+phold_annot2 %>% count(product) %>% arrange(desc(n)) %>% view
+gene<-"VFDB virulence factor protein"
+phold_annot2 %>% filter(product == gene) -> phold_selected_gene
+
+#Select vOTUs
+phold_selected_gene %>% pull(votu) %>% unique -> votus
+
+#Pick the sequences of the viruses
+Biostrings::readDNAStringSet(
+  filepath = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/OTU/all_OTUs_no_doubleBB.fasta",format = "fasta") -> votus_fna
+votus_fna[names(votus_fna) %in% votus] -> selected_votus_fna
+
+dir.create("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/OTU_morons")
+
+Biostrings::writeXStringSet(
+  selected_votus_fna,
+  filepath = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/OTU_morons/votus_phosphoadenosine_phosphosulfate_reductase.fa",format = "fasta")
+
+```
+
+#-------------------------------------------------------------------------------
+# ~~~ MAG - vOTUs ~~~
+# Summarise iphop results
+## Number of vOTUs associated to a host tax
+```{r, echo = TRUE, warning=FALSE, message=FALSE, results='show'}
+iphop_mags<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/iphop_mags_vOTUs/Host_prediction_to_genome_m90.csv") %>% rename(votu=Virus)
+
+iphop_mags$`Host taxonomy`%>% str_split(";", simplify = T) %>%
+  as.data.frame -> iphop_mags_tax
+names(iphop_mags_tax) = c("Domain", "Phylum", "Class", "Order", "Family", "Genus")
+cbind(iphop_mags, iphop_mags_tax[,-8]) -> iphop_mags2
+
+# Remove vOTUs not in vir_analysis (unmapped)
+iphop_mags2[votu %in% vir_analysis$votu] -> iphop_mags3
+
+iphop_mags3 %>% group_by(Phylum, votu) %>% count -> iphop_phy
+iphop_mags3 %>% group_by(Phylum, Class, votu) %>% count -> iphop_class
+iphop_mags3 %>% group_by(Phylum, Family, votu) %>% count -> iphop_fam
+
+iphop_fam %>%
+  group_by(Phylum, Family) %>%
+  count -> iphop_fam_count
+
+iphop_class %>%
+  mutate(Phylum = str_remove_all(Phylum, "p__"),
+         Class = str_remove_all(Class, "c__")) -> iphop_phy_class_count
+
+```
+## Summarise number of vOTUs associated to a host tax
+```{r, echo = TRUE, warning=FALSE, message=FALSE, results='show'}
+iphop_phy_class_count %>%
+  ungroup %>%
+  mutate(prop=100*(n/sum(n)))
+
+# Count the number of unique Phyla  
+unique(iphop_phy_class_count$Phylum) %>% length
+
+# Count the total number of vOTU  
+iphop_phy_class_count$n %>% sum
+
+# Info about the viruses
+vir_analysis[votu %in% iphop_phy$votu] -> votu_hits
+
+votu_hits %>%
+  count(Class) %>% 
+  ungroup %>% mutate(prop=n/sum(n)*100)
+
+votu_hits %>%
+  summarise(sum_vir = sum(str_detect((votu),"vir_")),
+            sum_metag = sum(str_detect((votu),"metag_"))
+            )
+
+# Count the unique number of vOTU  
+iphop_phy$votu %>% unique %>% length
+
+# phyla predicted but not matched
+setdiff(
+  unique(iphop_phy_class_count$Phylum),
+  str_remove(mag_analysis$Phylum, "p__")
+  ) -> non_matched
+length(non_matched)
+
+# phyla predicted but and matched
+intersect(
+  str_remove(mag_analysis$Phylum, "p__"),
+  unique(iphop_phy_class_count$Phylum)) -> matched
+length(matched)
+
+# Propotion of matched
+100*(length(matched)/ (length(non_matched) + length(matched)))
+
+```
+#
+# PLOT: Barplots of predicted Classes and Phyla
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+#load colors
+iphop_phy_class_count %>% filter(n>1) %>%
+  group_by(Phylum, Class) %>%
+  summarise(sum=sum(n)) %>%
+  ggplot(aes(y=reorder(Class, sum), x=sum, fill = Phylum)) + 
+  geom_bar(stat="identity", color="black") +
+  scale_fill_manual(values = tree_colors, na.value = NA) +
+  ylab("Predicted host Phylum") + xlab("n° of vOTUs") + 
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        axis.title.y = element_text(size = 0),
+        axis.title.x = element_text(size = 15),
+        
+        ) -> gg_iphop_phy_count;gg_iphop_phy_count
+
+ggsave(plot = gg_iphop_phy_count,
+       filename =  paste0("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/iphop_phy_class_count_14apr25.png"),
+         width =5.5, height = 6, units = "in", scale = 1)
+
+mag_analysis %>%
+  mutate(
+    iphop_fam=
+    case_when(
+    Family %in% iphop_fam_count$Family ~ T, .default = F))
+```
+
+# Extract iphop associations
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+vir_analysis %>%
+  dplyr::select(votu, mag_interaction) %>%
+  mutate(OTU=str_split(mag_interaction, ";")) %>% 
+  unnest(cols = c(OTU)) %>% 
+  filter(grepl("SemiBin", OTU)) %>%
+  dplyr::select(votu, OTU) %>% rename(vir=votu, mag=OTU) -> mag_votu
+```
+
+# Association between MAG taxonomy and vOTU tax prediction
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+# Correlation between number of vOTU in predicted MAG Class and n.o MAG in Class 
+mag_analysis_nice[,.(`MAG ID`, Class)] %>%
+  mutate(Class = str_remove(Class, "c__")) %>%
+  group_by(Class) %>%
+  summarise(sum_class = n()) %>%
+  merge(
+iphop_phy_class_count %>%
+  group_by(Class) %>% 
+  summarise(sum_votu =sum(n)), by = "Class") -> votu_pred_count_gem_abund
+
+# Check distribution
+shapiro.test(votu_pred_count_gem_abund$sum_class)
+shapiro.test(votu_pred_count_gem_abund$sum_votu)
+
+cor.test(votu_pred_count_gem_abund$sum_class, 
+         votu_pred_count_gem_abund$sum_votu,
+         method = "spearman"
+        )
+
+cor.test(votu_pred_count_gem_abund$sum_class, 
+         votu_pred_count_gem_abund$sum_votu,
+         method = "kendall"
+        )
+
+plot(votu_pred_count_gem_abund$sum_class, 
+         votu_pred_count_gem_abund$sum_votu)
+
+# Correlation between average abundance of vOTU from with Class is predicted and MAG Class abundance
+mag_analysis_nice[,.(Class, `Average Relative Abundance`)] %>%
+  mutate(Class = str_remove(Class, "c__")) %>%
+  group_by(Class) %>%
+  summarise(sum_mag_class = mean(`Average Relative Abundance`)) %>%
+  merge(
+iphop_phy_class_count %>%
+  ungroup %>%
+  select(c(votu, Class)) %>%
+  unique %>%
+  merge(vir_analysis[,.(votu, mean_vir_all)], by="votu") %>%
+  group_by(Class) %>%
+  summarise(sum_votu_class=mean(mean_vir_all))
+  , by = "Class") -> 
+  class_pred_votu_mag_abundance
+
+# Double check with data shuffling
+#class_pred_votu_mag_abundance %<>%
+#  mutate(sum_mag_class=sample(sum_mag_class))
+  
+# Check distribution
+shapiro.test(class_pred_votu_mag_abundance$sum_mag_class)
+shapiro.test(class_pred_votu_mag_abundance$sum_votu_class)
+
+cor.test(class_pred_votu_mag_abundance$sum_mag_class, 
+         class_pred_votu_mag_abundance$sum_votu_class,
+         method = "pearson"
+        )
+
+plot(class_pred_votu_mag_abundance$sum_mag_class, 
+         class_pred_votu_mag_abundance$sum_votu_class)
+
+#Check vOTU-GEM correlation
+iphop_mags[grepl("SemiBin", `Host genome`),] -> votu_gem_association
+
+load("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_MPSE_norm_mags99c70c10a99.RData")
+mag_MPSE_norm@assays@data@listData[["RelhellingerBySample"]] -> GEMs_bysample
+colnames(GEMs_bysample)
+
+load("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_MPSE_norm_04Oct24.RData")
+vir_MPSE_norm@assays@data@listData[["RelhellingerBySample"]] -> vOTUs_bysample
+
+colnames(GEMs_bysample) %<>% toupper() %>% str_replace("ART", "CON") %>% str_remove("\\.1")
+colnames(vOTUs_bysample) %<>% toupper() %>% str_replace("ART", "CON") %>% str_remove("\\.1")
+
+colnames(GEMs_bysample)
+colnames(vOTUs_bysample) 
+
+intersect(colnames(vOTUs_bysample), colnames(GEMs_bysample)) -> shared_columns
+
+rbind(
+vOTUs_bysample[,shared_columns],
+GEMs_bysample[,shared_columns]) %>% scale -> mat
+
+mat[c(votu_gem_association$votu,votu_gem_association$`Host genome`),] %>% 
+  t %>% cor -> cor_mat
+
+cor_mat[
+  grepl("vir|metag", rownames(cor_mat)),
+  grepl("SemiBin", colnames(cor_mat))
+  ] %>% reshape2::melt() %>% filter(abs(value)>0.95) -> cor_mat_f_l
+
+plot(mat["art_SemiBin_1041",],
+     mat["metag_nat_2436508",]
+     )
+
+plot(mat["art_SemiBin_244",],
+     mat["metag_art_1946551_full",]
+     )
+
+fread(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_analysis_aux_7apr25.csv")-> vir_analysis_aux
+vir_analysis_aux[votu %in% cor_mart_f_l$Var1] %>% view()
+mag_analysis[OTU %in% cor_mart_f_l$Var2] %>% view()
+
+
+```
+# ----------------------------------------------------------------------------------
+# AMGs + tax pred
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+vir_analysis %>% filter(host_taxonomy != "") -> vir_analysis_host
+
+phold_annot_summary %>%
+  dplyr::select(-c(annot_prop, CDS, unk)) %>%
+  column_to_rownames("votu") %>% as.matrix()-> phold_annot_summary_mat
+phold_annot_summary_mat[phold_annot_summary_mat>1]=1
+
+# Create a row annotation object
+row_annot <- 
+  rowAnnotation(
+  Phylum = vir_analysis_host$Phylum,
+  "Host taxonomy" = vir_analysis_host$host_taxonomy %>% str_extract("p__[:alpha:]+")
+)
+
+phold_annot_summary_mat[vir_analysis_host$votu,] %>%
+  Heatmap(col=c("white", "red4"),
+          show_row_names = FALSE,
+          show_row_dend = FALSE,
+          right_annotation = row_annot,
+          cluster_rows = T,
+          cluster_columns = F, row_split = vir_analysis_host$Phylum
+          )
+
+phold_annot %>% 
+  filter(votu %in% vir_analysis_host$votu & grepl("other",`function`))
+```
+
+## Annotations of MAG - vOTU interactions
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+vir_analysis2 %>% filter(grepl("art|nat", mag_interaction)) -> vir_an_mags
+phold_description %>% filter(Contig %in% vir_an_mags$votu) %>%
+  pivot_wider(names_from = Description, values_from = Count) %>% view
+phold_annot %>% filter(contig_id %in% vir_an_mags$votu) %>% 
+  group_by('function', product) %>% tally %>% view
+```
+# ----------------------------------------------------------------------------------
+# Contig Taxonomy
+
+## Relative abundance by superkingdom
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+load("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/Rdata/TPM_Viruses_Eukaryota_Bacteria_Archaea_MPSE.Rdata")
+se_hell<-TPM_Viruses_Eukaryota_Bacteria_Archaea
+
+#Hellinger normalization
+se_hell_norm <- 
+  mp_decostand(se_hell, method = "hellinger", .abundance = Abundance)
+
+#Calculate abundance ----
+se_hell_norm %<>%
+  mp_cal_abundance(
+    .abundance = hellinger,
+    force = T,
+    action = "add"
+  )
+se_hell_norm %>%
+  as.data.table %>%
+  select(OTU, Sample, superkingdom, RelhellingerBySample) -> test
+
+test %>%
+  group_by(superkingdom, Sample) %>%
+  summarise(sum=sum(RelhellingerBySample)) %>%
+  ungroup() %>%
+  group_by(superkingdom) %>%
+  summarise(mean=mean(sum)) %>% view
+
+se_hell_norm %>%
+  group_by(superkindom) %>%
+  summarise(sum=sum(RelhellingerBySample))
+
+```
+
+## Barplots
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+#Import MPSE data ----
+load("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/Rdata/TPM_Viruses_Eukaryota_Bacteria_Archaea_MPSE.Rdata")
+load("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/Rdata/TPM_Eukaryota_MPSE.Rdata")
+load("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/Rdata/TPM_Archaea_MPSE.Rdata")
+load("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/Rdata/TPM_Bacteria_MPSE.Rdata")
+load("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/Rdata/TPM_Eukaryota_MPSE.Rdata")
+
+se_hell<-TPM_Eukaryota
+se_hell<-TPM_Archaea
+se_hell<-TPM_Bacteria
+se_hell<-TPM_Viruses_Eukaryota_Bacteria_Archaea
+se_hell$group %<>% toupper %>% str_replace("ART", "RES") %>% factor(levels = c("RES", "NAT"))
+rownames(se_hell@colData) %<>% str_replace("Art", "Res")
+
+#Hellinger normalization
+se_hell_norm <- 
+  mp_decostand(se_hell, method = "hellinger", .abundance = Abundance)
+
+#Calculate abundance ----
+se_hell_norm %<>%
+  mp_cal_abundance(
+    .abundance = hellinger,
+    force = T,
+    action = "add"
+  )
+
+#Plot abundance
+se_hell_norm %>%
+  mp_plot_abundance(
+    .abundance=RelhellingerBySample,
+    .group=group, 
+    taxa.class = phylum, 
+    topn = 24,
+    relative = TRUE,
+    force = T
+  ) -> barplots;
+
+barplots +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        legend.text = element_text(size = 6)
+        ) -> b1
+
+ggsave(
+  plot = b1,
+  filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/barplots_euk.png",
+  device = "png",
+  dpi = 600,
+  units = "cm",
+  height = 15,
+  width = 30
+  )
+
+```
+
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+
+
+```

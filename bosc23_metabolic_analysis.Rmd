@@ -1,0 +1,3863 @@
+---
+title: "bosc23_metabolic_analysis_29oct24"
+author: "Riccardo Frizzo"
+date: "2024-10-29"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+#Init
+```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+knitr::opts_chunk$set(echo = FALSE, fig.width = 12, fig.height = 10, size = 1) #7 and 4
+
+libs<-c("data.table", "tidyverse", "foreach", "magrittr", "ComplexHeatmap", "doParallel", "openxlsx", "gridExtra", "openxlsx", "ggridges")
+invisible(lapply(libs, require, character.only = TRUE))
+
+# Load colors
+load("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/tax/tree_colors_14apr25.RData")
+tree_colors<-c(tree_colors, "gray10")
+names(tree_colors)[15]="Thermoproteota" #Add the archaea :)
+
+zy=c("#A5191CE6","white","#65B59AE6")
+scales::show_col(zy[c(3,1,2)],ncol = 3)
+saltmarsh_colors = c(Constructed=zy[1], Natural=zy[3], ns = zy[2])
+```
+
+#---     
+## Metabolites vocabulary
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_annots<-fread("/home/riccardo/rstudio-server/storage16TB/riccardo/tools/gapseq_feb25/gapseq/dat/seed_metabolites_edited.tsv")
+```
+
+## Reactions vocabulary
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+#fread("/home/riccardo/rstudio-server/storage16TB/riccardo/tools/gapseq/dat/seed_reactions_corrected.tsv")-> seed_reactions_db
+fread("/home/riccardo/rstudio-server/storage16TB/riccardo/tools/gapseq_feb25/gapseq/dat/seed_reactions_corrected.tsv")-> seed_reactions_db
+
+# Watch out!! A single reaction name, matches several IDs
+(count(seed_reactions_db, name)$n>1) %>% table
+(count(seed_reactions_db, name)$n>5) %>% table
+
+# IDs are unique
+(count(seed_reactions_db, id)$n>1) %>% table
+
+# Simplify reactions DB
+names(seed_reactions_db)
+
+seed_reactions_db %>% 
+  dplyr::select(id, name, compound_ids,
+                 definition 
+                ) %>%
+  dplyr::rename(react_id2=id,
+                react_name=name) -> reaction_db_simple
+```
+
+## Pathways vocabulary
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Import pathway hierarchy
+gapseq_pwy_hierarchy<-
+  rbind(fread("/home/riccardo/rstudio-server/storage16TB/riccardo/tools/gapseq_feb25/gapseq/dat/meta_pwy.tbl"),
+        fread("/home/riccardo/rstudio-server/storage16TB/riccardo/tools/gapseq_feb25/gapseq/dat/custom_pwy.tbl"))
+gapseq_pwy_hierarchy <- gapseq_pwy_hierarchy[!duplicated(id)]
+gapseq_pwy_hierarchy %<>%
+  mutate(ID=str_remove_all(id, "\\|")) %>% 
+  dplyr::select(ID, name, hierarchy) %>% 
+  dplyr::rename(Name=name) %>%
+  unique
+
+# read and prepare pathway DB
+pwyDB <- rbind(fread("/home/riccardo/rstudio-server/storage16TB/riccardo/tools/gapseq_feb25/gapseq/dat/meta_pwy.tbl"),
+               fread("/home/riccardo/rstudio-server/storage16TB/riccardo/tools/gapseq_feb25/gapseq/dat/custom_pwy.tbl"))
+
+pwyDB <- pwyDB[!duplicated(id)]
+pwyDB <- pwyDB[, .(id, name, spont, reaId)]
+pwyDB[, reaNr := length(unlist(strsplit(reaId, ","))), by = id] # Count n° of reactions
+pwyDB[, spontNr := length(unlist(strsplit(spont, ","))), by = id] # Count n° of spont reactions
+pwyDB %<>% mutate(id=str_remove_all(id, "\\|"))
+
+pwyDB %>% select(id, name) %>% 
+  dplyr::rename(ID = id) %>% mutate(ID=str_remove_all(ID, "\\|")) -> pwy_keys
+```
+#----
+# Init model analysis
+# ASSUMPTION: Presence of oxygen
+## Preprocess
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+require(foreach); require(magrittr)
+
+# Import MAG analysis for taxonomy and other parameters
+mag_analysis<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_analysis_co_de_24sep24.tsv")
+
+# Define the number of MAGs (and models)
+nmag=nrow(mag_analysis)
+```
+
+### Import and tidy FBA data
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# !!! Work with IDs, metabolite names are not unique
+fba_res<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/fba_a_ana_erobic_31oct24.tsv")
+
+# Check zero_flux_mags
+fba_res %>% 
+  filter(sim_O2 & flux != 0) %>% 
+  pull(OTU) %>% unique %>% length
+fba_res %>% 
+  filter(!sim_O2 & flux != 0) %>% 
+  pull(OTU) %>% unique %>% length
+
+#Select exchanged metabolites
+fba_res %>% dplyr::rename(m=name, f=flux) %>%
+  mutate(m=str_remove_all(m ,"-e0| Exchange") %>% str_remove(" $"),
+         id=str_remove_all(ID, "EX_|_e0"), .after = "OTU") %>%
+  unique() -> fba_res1
+
+# Extract extra info
+fba_res1 %>%
+  merge(
+metab_annots %>% dplyr::select(id, formula, is_core) %>%
+  mutate(
+    n_C=str_extract(formula, "C[:digit:]+") %>% parse_number(),
+    n_C=case_when(str_detect(formula, "C[HO].") ~ 1, .default = n_C),
+    noC=is.na(n_C)), by="id") -> fba_res2
+
+# Import all metabolites used in the models 
+models_metabolites<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/models_metabolites.tsv")
+```
+
+### Import and tidy FVA reactions
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+#Import FVA reactions
+fva_res<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/fva_a_ana_erobic_31oct24.tsv") %>%
+  dplyr::rename(react_id=react) %>%
+  mutate(react_id2=str_remove(react_id, "_[:alnum:]+")) %>%
+  filter(!grepl("EX_", react_id)) %>% unique # exclude exchange reactions
+
+# Assume presence of oxygen
+fva_res[sim_O2 == T] -> fva_res_ox
+
+#Import all reactions in the models
+models_reactions<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/models_reactions.tsv")
+
+#Import all genes
+models_genes<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/models_genes.tsv")
+
+```
+
+### Import and summarise subsystems (SBS) and sbs-react 
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/models_subsystems.tsv") -> subs
+
+fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/sbs_react.tsv") -> sbs_react 
+
+subs %>% dplyr::rename(ID=subsystem) -> subs_annot 
+
+# Trace the reactions to their subsystem
+sbs_react %>% mutate(react_id = str_remove(react_id, "_c0")) -> sbs_react1
+
+# Import completeness information calculated on the gap-filled models
+sbs_completeness<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/gapfilled_pathways_28feb25.tsv") %>%
+  mutate(ID = str_remove_all(ID, "\\|"))
+```
+#----
+# Init metab analysis
+## Import metaB IDs 
+## Assign a modelSEED ids
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Import assigned metabolites 
+fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaB/LCGC_metabolite_ids_subclasses_curated_classified_hmdb_24dic24.csv") %>%
+  mutate(Subclass = str_remove(Subclass, "\t"))-> metab_ids_curated
+
+# Use KEGG IDs and HMDB IDs to find the cpd id in gapseq (modelSEED) db
+foreach(i = 1:nrow(metab_ids_curated))%do%{
+  
+  metab_ids_curated[i,]$HMDB->hmdbid
+  metab_ids_curated[i,]$KEGG->keggid
+  metab_ids_curated[i,]$name_orig->name_orig
+  metab_ids_curated[i,]$Subclass->subclass
+  
+  #Find modelSEED ids
+  metab_annots %>% 
+    filter(
+        grepl(keggid, keggID) | 
+        grepl(hmdbid, hmdbID)) %>% 
+    dplyr::select(id, name, keggID, hmdbID) %>%
+    add_column(name_orig=name_orig,
+               subclass=subclass)->hits
+  if(nrow(hits)==0){
+    data.frame(id=NA,
+               name=NA,
+               keggID=NA,
+               hmdbID=NA,
+               name_orig=name_orig,
+               subclass=subclass) # Create empty line in case of nohit
+    }else(hits)
+  } %>% rbindlist -> metab_ids_modelseed
+
+metab_ids_modelseed %>% 
+  filter(is.na(id)) -> not_matched
+
+# Manual curation of non matches (go to ModelSEED Compunds and look at synonyms)
+not_matched[1,]$id="cpd24232";not_matched[2,]$name="eicosane";
+not_matched[3,]$id="cpd35300";not_matched[3,]$name="gamma-Glu-Leu";
+not_matched[8,]$id="cpd33424";not_matched[8,]$name="Glu-Thr";
+not_matched[9,]$id="cpd25630";not_matched[9,]$name="N-acetyl-(L)-arginine";
+not_matched[12,]$id="cpd33751";not_matched[12,]$name="2-octanone";
+not_matched[13,]$id="cpd33751";not_matched[13,]$name="2-nonanone";
+not_matched[15,]$id="cpd15618";not_matched[15,]$name="nonanal";
+not_matched[16,]$id="cpd15644";not_matched[16,]$name="undecanal";
+not_matched[18,]$id="cpd02498";not_matched[18,]$name="2,3-Dihydroxy-isovalerate";
+not_matched[19,]$id="cpd32753";not_matched[19,]$name="3-methylinosine";
+not_matched[20,]$id="cpd32380";not_matched[20,]$name="5-methylcytidine";
+not_matched[21,]$id="cpd00093";not_matched[21,]$name="Anthranilate";
+not_matched[22,]$id="cpd10271";not_matched[22,]$name="2-Ethyltoluene";
+
+not_matched %>% 
+  filter(!is.na(id)) -> rematched
+
+metab_ids_modelseed %>% 
+  filter(!is.na(id)) -> matched
+
+rbind(matched, rematched) %>% add_column(orig="metab")-> matched1
+```
+
+## SANITY CHECK: Metabolite merging
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+## Check ambiguos matches
+matched1 %>%
+  group_by(name_orig) %>% count %>% 
+  filter(n>1) %>%
+  pull(name_orig) -> ambiguos
+
+matched1[name_orig %in% ambiguos] 
+
+# Check duplicates
+matched1 %>%
+  group_by(id) %>% count(id) %>%
+  filter(n>1) %>% pull(id) -> dups
+matched1[id %in% dups] %>% arrange(id)
+
+# Check unmatched
+not_matched %>% 
+  filter(is.na(id)) 
+
+# Final dataset
+matched1 %>% data.table->metab_cpds
+```
+
+#----
+#Subsystems
+##Prepare subsystem annotation
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Add completeness info
+left_join(subs_annot, sbs_completeness[,.(OTU, ID, C_new_corr)], by=c("OTU","ID")) -> subs_annot0
+# Add subsystem categories
+subs_annot0 %>% merge(gapseq_pwy_hierarchy, by="ID") -> subs_annot1
+
+#Tidy: select hierachy as displayed in metacyc
+subs_annot1$hierarchy %>%
+  str_extract_all("FRAMES[:graph:]+") %>% str_remove_all("\\|") %>%
+  str_split(",", simplify = T) %>% as.data.frame->hdf
+
+subs_annot1 %>%
+  dplyr::select(OTU,ID, Name, hierarchy, C_new_corr) %>% cbind(hdf) -> subs_annot2
+
+```
+## Hierarchy aestethic fixes
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+subs_annot2 %>%
+  filter(str_detect(V5, "[:upper:][:upper:]+")) %>% pull(V5) %>% unique
+
+subs_annot2 %<>%
+  mutate(
+  V5 = str_replace(V5,"CHLORINATED-COMPOUNDS-DEG", "Chlorinate-Compounds-Degradation"),
+  V5 = str_replace(V5,"AROMATIC-COMPOUNDS-DEGRADATION", "Aromatic-Compounds-Degradation"),
+  V5 = str_replace(V5,"AMINE-DEG", "Amine-Degradation"),
+  V5 = str_replace(V5,"GLYCOLYSIS-VARIANTS", "Glycolysis-Variants"),
+  V5 = str_replace(V5,"C1-COMPOUNDS", "C1-Compounds"),
+  V5 = str_replace(V5,"SECONDARY-METABOLITE-BIOSYNTHESIS", "Secondary-Metabolite-Biosynthesis"),
+  V5 = str_replace(V5,"HORMONE-SYN", "Hormone-Synthesis"),
+  V5 = str_replace(V5,"TCA-VARIANTS", "TCA-Variants"),
+  V5 = str_replace(V5,"CYCLITOLS-DEG", "Cyclitols-Degradation"),
+  V5 = str_replace(V5,"SECONDARY-METABOLITE-DEGRADATION", "Secondary-Metabolite-Degradation"),
+  V5 = str_replace(V5,"HORMONE-DEG", "Hormone-Degradation"),
+  V5 = str_replace(V5,"AROMATIC-COMPOUNDS-BIOSYN", "Aromatic-Compounds-Biosynthesis"),
+  V5 = str_replace(V5,"CHEMOAUTOTROPHIC-ENERGY-METABOLISM", "Chemoautotrophic-Metabolism"),
+  V5 = str_replace(V5,"COFACTOR-DEGRADATION", "Cofactor-Degradation"),
+  V5 = str_replace(V5,"NUCLEO-DEG", "Nucleotides-Degradation"),
+  V5 = str_replace(V5,"CARBOXYLATES-DEG", "Carboxylates-Degradation")
+  )
+
+```
+
+## Prep. category-subsystem-reaction-flux dataset
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Merge subsystem-reactions dataset with the hierarchy
+# Use full_join to not lose unassigned reactions
+full_join(subs_annot2 %>% select(V4, V5, ID, Name) %>% unique,
+      sbs_react %>% dplyr::rename(ID=sbs), by="ID") -> sbs_react_ox_categories
+
+# Foreach OTU and reactions, assign the corresponding flux values
+full_join(sbs_react_ox_categories, fva_res_ox, by=c("react_id", "OTU")) %>%
+  dplyr::select(!c(presence, sim_O2)) -> sbs_fva_ox_categories
+
+######### IMPORTANT OBJECT ###########
+# The object sbs_fva_ox_categories describes the reaction and the subsystems contained in each GEM
+# as well as the min and max flux values for each reaction in each GEM
+sbs_fva_ox_categories
+######################################
+```
+
+## Summarise subsystems and reactions
+## Build summary dataset 
+### Calculate freq. of substystems in GEMs
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Calculate the distribution of GEMs across each subsystem
+sbs_GEM_dist = subs_annot2 %>% 
+  group_by(V4, V5, V6, ID, Name) %>% count(sort = T, name = "n_gems") %>%
+  mutate(prop_gems=round(n_gems/nmag,3)*100)
+```
+
+### Calculate average completeness
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+subs_annot2 %>%
+  group_by(ID) %>%
+  summarise(
+         avg_compl = mean(C_new_corr),
+         sd_compl = sd(C_new_corr)
+         ) %>% as.data.table -> sbs_avg_comp
+```
+### Add sbs size info from the database
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Include the actual number of reactions in the sbs
+# Useful to have an idea of how many reactions a pathway should have
+pwyDB[id %in% sbs_GEM_dist$ID] -> pwyDB_f #select only the subsystems to analyse to speed-up
+  merge(sbs_GEM_dist,
+      pwyDB_f %>% 
+       dplyr::rename(ID=id) %>%
+       dplyr::select(ID, reaNr,spontNr), by="ID") -> sbs_GEM_dist_info
+```
+
+### CHECK n° reactions by sbs: min, median, max
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# For each GEM, count the number of reactions that make every subsystem
+# Summarise by calculating the min, median, and max to have an idea of the distribution
+# across the models
+sbs_fva_ox_categories %>%
+  group_by(OTU, ID) %>%
+  count(name = "n_react") %>% 
+  group_by(ID) %>%
+  summarise(
+    min_n_react=min(n_react),
+    median_n_react=median(n_react),
+    max_n_react=max(n_react)) %>% data.table -> sbs_react_summary
+
+```
+
+### N° of reactions in each GEMs and subsytem
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# For each subsystem and GEM, count:
+## - the number of reactions that make every subsystems
+## - the number of reactions with flux !=0 
+## - the number of reactions with flux ==0 
+
+sbs_fva_ox_categories  %>%
+  group_by(ID, OTU) %>% 
+  summarise(
+    n_react=n(),
+    sum_active=sum(min.flux!=0 | max.flux!=0),
+    sum_inactive=sum(min.flux==0 & max.flux==0)
+  ) %>% data.table() %>% filter(!is.na(ID))-> sbs_gem_nreact
+```
+
+### Mean number of reactions by subsystem
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# For each subsystem, calculate across GEMs:
+## - the mean number of reactions with flux !=0 a
+## - the mean number of reactions with flux ==0 
+
+sbs_gem_nreact %>%
+  group_by(ID) %>%
+  summarise(
+    mean_n_react = mean(n_react),
+    mean_sum_active = mean(sum_active),
+    mean_sum_inactive = mean(sum_inactive)
+    ) %>% 
+  mutate(f1_prop = round(mean_sum_active/mean_n_react, 3)*100)-> sbs_fva_freq
+
+```
+
+### Merge the summaries into one
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Merge data
+merge(sbs_GEM_dist_info, sbs_react_summary, by = "ID") -> sbs_info
+merge(sbs_info, sbs_avg_comp, by="ID") -> sbs_info1
+merge(sbs_info1, sbs_fva_freq, by = "ID") %>% data.table-> sbs_info2
+```
+
+# TIDY: Filter out subsytems with very few reacts and clean
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Find incomplete sbs that got into the models  
+sbs_info2 %>% filter(reaNr>5*max_n_react) -> exc1; nrow(exc1)
+
+# Filter out bad sbs
+sbs_info_fva_f<-sbs_info2[!ID %in% exc1$ID] # out of the summary
+sbs_fva_ox_categories_f<-sbs_fva_ox_categories[!ID %in% exc1$ID] #out of the sbs_fva_ox data
+sbs_fva_ox_categories_f$ID %>% unique %>% length
+sbs_fva_ox_categories_f$react_id2 %>% unique %>% length
+
+sbs_fva_ox_categories_excluded<-sbs_fva_ox_categories[ID %in% exc1$ID]
+sbs_fva_ox_categories_excluded$ID %>% unique
+sbs_fva_ox_categories_excluded$react_id2 %>% unique %>% length
+
+subs_annot2[!ID %in% exc1$ID]->subs_annot3 # out of the full dataset
+sbs_react1[!sbs %in% exc1$ID]->sbs_react2 # out of the subsystems - reactions dataset
+
+# Replace empty string with "Unclassified"
+sbs_info_fva_f %<>%
+mutate(
+  V4 = str_replace(V4, "^$", "Unclassified"),
+  V5 = str_replace(V5, "^$", "Unclassified"))
+
+subs_annot3 %<>%
+mutate(
+  V4 = str_replace(V4, "^$", "Unclassified"),
+  V5 = str_replace(V5, "^$", "Unclassified"))
+
+sbs_fva_ox_categories_f %<>%
+mutate(
+  V4 = str_replace(V4, "^$", "Unclassified"),
+  V5 = str_replace(V5, "^$", "Unclassified"))
+
+```
+
+## TIDY2 CHECKS: Check excluded reactions and sbs
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+exc1$V5 %>% table
+sbs_fva_ox_categories_excluded$V4 %>% table
+sbs_fva_ox_categories_f$V4 %>% table
+
+#Initial number of reactions
+nrow(sbs_fva_ox_categories)
+sbs_fva_ox_categories$react_id %>% unique %>% length
+
+# after filtering sbs
+nrow(sbs_fva_ox_categories_f)
+sbs_fva_ox_categories_f$react_id %>% unique %>% length 
+
+# excluded
+nrow(sbs_fva_ox_categories_excluded)
+sbs_fva_ox_categories_excluded$react_id %>% unique %>% length
+sbs_fva_ox_categories_excluded$V5 %>% table
+
+setdiff(
+sbs_fva_ox_categories$react_id2,
+sbs_fva_ox_categories_excluded$react_id)
+
+# Look at excluded reactions
+seed_reactions_db[id %in% sbs_fva_ox_categories_excluded$react_id2] 
+
+# Debug 
+# Check how many reaction were exluded by filtering 
+# sbs_info_fva first and then using its IDs for selection
+
+sbs_fva_ox_categories_wrong_filter<-sbs_fva_ox_categories[ID %in% sbs_info_fva_f$ID] #out of the sbs_fva_ox data
+sbs_fva_ox_categories_wrong_filter$ID %>% unique %>% length
+sbs_fva_ox_categories_wrong_filter$react_id2 %>% unique %>% length
+sbs_fva_ox_categories_f$react_id %>% unique %>% length 
+5320-3625
+
+# What is sbs_fva_ox_categories that is not in sbs_info_fva?
+sbs_fva_ox_categories_f[!ID %in% sbs_info_fva_f$ID] %>%
+  group_by(V4,V5,Name, react_id2) %>% count 
+
+# What is sbs_fva_ox_categories that is not in sbs_info_fva?
+sbs_fva_ox_categories_f[!ID %in% sbs_info_fva_f$ID] %>%
+  group_by(V4,V5, ID,Name, react_id2) %>% count 
+
+sbs_fva_ox_categories_f[!ID %in% sbs_info_fva_f$ID] %>%
+  group_by(V4,V5,Name) %>% count 
+# 159763 reactions with no sbs
+```
+###--
+## Summary of subsystems and reactions
+## Datasets
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+###### IMPORTANT OBJECTS ########
+# Compounds found by MS and linked to modelSEED ids
+metab_cpds
+
+# all subsystems considered with full hierarchy
+# for each gem
+subs_annot3
+
+# long form matrix with the association between subsytems and reaction
+# for each gem
+sbs_react2
+
+# addition to sbs_react2 with all the FVA values foreach reactions
+# and subsytem hierarchy
+# for each gem
+sbs_fva_ox_categories_f
+
+# sbs by category and sub-category,
+# distribution across GEMs, expected number of reactions
+# min, max, median number of reaction and total across all GEMS
+# median number of active and inactive reactions
+sbs_info_fva_f
+#################################
+```
+
+## Subsystem and reactions taxonomy lookup
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+sbs_info_fva_f
+
+react_sbs_metab_info[grepl("raffino", react_name)] -> sel_reacts;sel_reacts
+mag_analysis[OTU %in% 
+  fva_res_ox[react_id2 %in% sel_reacts$react_id2, OTU]
+] %>% view
+
+
+mag_analysis[OTU %in% 
+  fva_res_ox[react_id2 %in% "rxn04384", OTU] 
+]%>% view
+
+# CysH
+mag_analysis[OTU %in% 
+  fva_res_ox[react_id2 %in% "rxn05239", OTU] 
+]%>% count(Family) %>% view
+
+
+
+sbs_fva_ox_categories_f[ID == "PWY-3781"] %>%
+  group_by(react_id2, OTU) %>% count %>%
+  pivot_wider(names_from = OTU, values_from = n) -> df
+
+df %>% column_to_rownames("Name") %>% as.matrix() -> mat
+
+#Chlorophyll-a-Biosynthesis
+mag_analysis[OTU %in% subs_annot3[ID == "PWY-5064", OTU],
+             .(OTU, Order, condition_higher_abund,mean_mag_abund_Art, mean_mag_abund_Nat)] -> diff
+diff %>%
+  pivot_longer(cols = c(mean_mag_abund_Art, mean_mag_abund_Nat)) %>%
+  group
+
+load(
+     file="~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_MPSE_norm_mags99c70c10a99.RData"
+     )
+
+mag_rel_abund<-mag_MPSE_norm %>% dplyr::select(OTU, Sample, Group, RelhellingerBySample) %>% data.table
+
+
+  
+```
+
+## MAKE: reactions summary (GEM counts, mean flux and subsystems)
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# When the reaction is not completely inactive, calculate median fluxes 
+fva_res_ox %>%
+    group_by(react_id2) %>%
+    summarise(
+      fmax_median= median(max.flux[(max.flux!=0 | min.flux!=0)],na.rm = T),
+      fmin_median= median(min.flux[(max.flux!=0 | min.flux!=0)],na.rm = T),
+      n_gems = n(),
+      n_f1 = sum((max.flux!=0 | min.flux!=0))
+      ) %>%
+  mutate(f1_prop = round(100*n_f1/n_gems,2),
+         prop_gems = round(100*n_gems/nmag,2)
+         ) -> f1_reacts
+
+f1_reacts %>%
+  merge(reaction_db_simple, by = "react_id2") -> react_info
+
+# Gather involved subsystems
+sbs_fva_ox_categories_f %>%
+    mutate(react_id2 = str_remove(react_id, "_c0")) %>%
+    select(ID, Name, react_id2) %>%
+    unique %>%
+  group_by(react_id2) %>%
+  summarise(
+    subsytems_ids=paste0(unique(ID), collapse = ";"),
+    subystems=paste0(unique(Name), collapse = ";")
+  ) -> react_sbs
+
+merge(f1_reacts, react_info, .by = "react_id2") %>%
+  merge(react_sbs, .by = "react_id2") -> react_sbs_info
+```
+
+### Avg. n° of sbs and n° of unique sbs in each GEM, by category
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+subs_annot3 %>% 
+  group_by(V4, OTU) %>% 
+  count %>% # for each GEM, count sbs in each each category
+  group_by(V4) %>%
+  summarise(sbs_mean=mean(n),
+            sbs_sd=sd(n)) %>% #mean of sbs count 
+  mutate(sbs_prop = round(sbs_mean/sum(sbs_mean)*100,2)) %>% 
+  merge(
+    subs_annot3 %>% 
+      group_by(V4) %>%
+      summarise(n_unique_sbs = length(unique(ID))),
+    by = "V4") %>% arrange(desc(sbs_mean)) -> summary_sbs_category
+
+# Each GEM has n sbs in this category
+# On average, GEMs have mean(n) sbs in this category
+```
+
+### Avg n° of sbs in each GEM, by subcategory
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+subs_annot3 %>% 
+  group_by(V4, V5, OTU) %>% 
+  count %>% # for each GEM, count sbs in each each category
+  group_by(V4, V5) %>%
+  summarise(mean=mean(n)) %>% #mean of sbs count 
+  mutate(prop = round(mean/sum(mean)*100,2)) %>% arrange(desc(mean)) -> avg_sbs_n_subcat;avg_sbs_n_subcat
+# Each GEM has n sbs in this category
+# On average, GEMs have mean(n) sbs in this category
+```
+
+### Avg n° of unique reactions in each GEM, and n° of unique reactions by category
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+sbs_fva_ox_categories_f %>% 
+  group_by(V4, OTU) %>%
+  summarise(n=length(unique(react_id))) %>%# for each GEM, count unique reactions in each sbs in each each category
+  group_by(V4) %>%
+  summarise(mean_react=mean(n), sd=sd(n)) %>% 
+  mutate(prop_mean_react = round(mean_react/sum(mean_react)*100,2)) %>% 
+    merge(
+    sbs_fva_ox_categories_f %>% 
+      group_by(V4) %>%
+      summarise(n_unique_reacts = length(unique(react_id))),
+    by = "V4") %>% arrange(desc(mean_react)) -> summary_sbs_react_category
+
+
+summary_sbs_react_category$n_unique_reacts %>% sum
+```
+
+### Avg n° of unique reactions in each GEM, by subcategory
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+sbs_fva_ox_categories_f %>% 
+  group_by(V4, V5, OTU) %>%
+  summarise(n=length(unique(react_id))) %>% #for each GEM, count unique reactions in each sbs in each each category
+  group_by(V4, V5) %>%
+  summarise(mean_react=mean(n), sd=sd(n)) %>% 
+  mutate(prop_mean_react = round(mean_react/sum(mean_react)*100,2)) %>% 
+  arrange(desc(mean_react))
+```
+
+### Avg n° of unique reactions (f!=0) in each GEM, by category
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+sbs_fva_ox_categories_f %>% 
+  filter(min.flux!=0 | min.flux!=0) %>%
+  group_by(V4, OTU) %>%
+  summarise(n=length(unique(react_id))) %>%# for each GEM, count unique reactions in each sbs in each category
+  group_by(V4) %>%
+  summarise(mean_react_flux=mean(n)) %>% 
+  mutate(prop_mean_react_flux = round(mean_react_flux/sum(mean_react_flux)*100,2)) %>% arrange(desc(mean_react_flux))
+```
+
+###--
+## Datasets description 1
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+###### IMPORTANT OBJECTS ########
+# all subsystems considered with full hierarchy
+# for each gem
+subs_annot3
+
+# long form matrix with the association between subsytems and reaction
+# for each gem
+sbs_react2
+
+# addition to sbs_react2 with all the FVA values foreach reactions
+# and subsytem hierarchy
+# for each gem
+sbs_fva_ox_categories_f
+
+# sbs by category and sub-category,
+# distribution across GEMs, expected number of reactions
+# min, max, median number of reaction and total across all GEMS
+# median number of active and inactive reactions
+sbs_info_fva_f
+#################################
+```
+
+### FUN: Summarise subsystems
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+sub_category = "TCA-VARIANTS"
+# Given a class, summarise sub-classes and subsystems
+sbs_dist_report <- function(sub_category = "Fermentation"){ #Fermentation
+  
+  # filter subsystems in this category from the report
+  sbs_info = sbs_info_fva_f[V5 %in% sub_category] %>% 
+    arrange(desc(n_gems))
+  
+  sbs_info_simple = sbs_info[,.(ID, V6, Name, n_gems,
+                                avg_compl, f1_prop, V5,
+                                reaNr, mean_n_react)]
+
+  # filter reactions in this category from the sbs-react
+  current_sbs_react = sbs_fva_ox_categories_f[ID %in% sbs_info$ID]
+  
+  # Calculate median n° of sbs and reaction in the category
+  current_sbs_react %>% group_by(OTU) %>% 
+    summarise(n_react = length(unique(react_id)),
+              n_sbs = length(unique(ID))
+              ) %>% ungroup %>%
+    summarise(median_n_react = median(n_react),
+              median_n_sbs = median(n_sbs)) -> median_react_sbs
+  
+  # calculate proportion of f1 reactions
+  sbs_info_fva_f [V5 %in% sub_category] %>%
+    pull(f1_prop) %>% mean -> avg_prop_f1_react
+
+  current_sbs_react %>%
+    select(react_id2, min.flux, max.flux) %>% 
+    summarise(
+      n_react = n(),
+      n_f1_react= sum(min.flux!=0 | max.flux!=0)
+    ) %>%
+    mutate(prop_f1_react=100*(n_f1_react/n_react)) -> prop_f1_react
+  
+  # filter reactions in this category from from the sbs-react, add reaction info
+  current_sbs_react %>% 
+    dplyr::select(Name, OTU, react_id2, min.flux, max.flux) %>% 
+    merge(reaction_db_simple, by = "react_id2") -> current_sbs_react1
+  
+  # distribution of reactions and active reactions across GEMs
+  fva_res_ox[react_id2 %in% unique(current_sbs_react1$react_id2)] %>%
+    group_by(react_id2) %>%
+    summarise(n_gems=n(),
+              n_gems_f1 = sum(min.flux!=0 | max.flux!=0)
+              ) %>% ungroup %>%
+    mutate(prop_gems = round(n_gems/nmag, 3)*100,
+           prop_gems_f1 = round(n_gems_f1/nmag, 3)*100
+           ) %>% 
+    arrange(desc(n_gems)) -> react_gem_dist
+  
+  # average flux values, subsystem counts and names
+  current_sbs_react1 %>% 
+    group_by(react_id2, react_name, definition) %>%
+    summarise(
+      n_sbs=length(unique(Name)),
+      median_min.flux=median(min.flux[(max.flux!=0 | min.flux!=0)],na.rm = T),
+      median_max.flux=median(max.flux[(max.flux!=0 | min.flux!=0)],na.rm = T),
+      sbs_involved=paste0(unique(Name), collapse = ";")
+      )-> react_flux_mean
+  
+  # merge flux averages and GEM distribution by reaction
+  merge(react_flux_mean, react_gem_dist, by = c("react_id2")) %>%
+    arrange(desc(n_gems)) %>% relocate(sbs_involved, .after = "prop_gems_f1")-> react_info
+
+  # merge all metabolites in a single vector  
+  metab_cpds[,id] -> metab_vec
+  paste0(metab_vec, collapse = "|")->metab_string
+  
+  # look for reaction with metabolites, summarise the metabo and their number,by react
+ current_sbs_react1[grepl(metab_string, compound_ids), .(Name, react_id2, react_name, compound_ids)] %>% 
+   unique %>% rowwise %>%
+   mutate(
+     n_cpd = length(unlist(strsplit(compound_ids, ";"))),
+     metab_hit = paste0(intersect(metab_vec, unlist(strsplit(compound_ids, ";"))), collapse = ";"),
+     metab_hit_n = length(intersect(metab_vec, unlist(strsplit(compound_ids, ";"))))
+          ) %>% select(Name, react_id2, n_cpd, metab_hit_n, metab_hit) -> metab_react_hit;metab_react_hit
+ 
+ # Add metab names
+   metab_react_hit %>%
+    mutate(
+    metab_name = 
+      paste0(
+        metab_annots[id %in% unlist(strsplit(metab_hit, ";")), name],
+        collapse = ";")) -> metab_react_hit2
+   
+ # merge with reactions information
+  merge(
+    metab_react_hit2,
+    reaction_db_simple[,.(react_id2, react_name, definition)],
+    by = "react_id2") -> metab_react_hit3
+  
+  # pull thee list of unique compunds in the sbs
+  cpd_unique = current_sbs_react1$compound_ids %>%
+    strsplit(";") %>%
+    unlist %>%
+    unique
+  # pull thee list of unique metaboulites found in the sbs
+  metab_unique = metab_react_hit$metab_hit %>%
+    strsplit(";") %>%
+    unlist %>%
+    unique
+
+  # add everything to the output list
+  list(
+    category = unique(sbs_info$V4),
+    sub_category = sub_category,
+    sbs_info = sbs_info_simple,
+    react_info = react_info,
+    metab_react_info = metab_react_hit3,
+    prop_high_freq = round((nrow(sbs_info[prop_gems>=50])/nrow(sbs_info))*100,2),
+    cpd_unique = cpd_unique,
+    metab_unique = metab_unique,
+    metab_counts = strsplit(metab_react_hit3$metab_name, ";") %>% unlist %>% table %>% sort,
+    median_n_sbs = median_react_sbs$median_n_sbs,
+    median_n_reacts = median_react_sbs$median_n_react,
+    prop_f1_react=avg_prop_f1_react
+  )
+}
+
+
+sbs_rep_stats<-function(sbs_rep_list){
+  data.frame(
+    category = sbs_rep_list$category,
+    sub_category = sbs_rep_list$sub_category,
+    n_subsystems = sbs_rep_list$sbs_info %>% nrow,
+    prop_HFS = sbs_rep_list$prop_high_freq,
+    n_reactions = sbs_rep_list$react_info$react_id2 %>% unique %>% length,
+    n_react_with_metab = sbs_rep_list$metab_react_info$react_id2 %>% unique %>% length,
+    n_cpd = sbs_rep_list$cpd_unique %>% length,
+    n_metab = sbs_rep_list$metab_unique %>% length,
+    median_n_reacts = sbs_rep_list$median_n_reacts,
+    median_n_sbs = sbs_rep_list$median_n_sbs,
+    prop_f1_react=sbs_rep_list$prop_f1_react
+    ) %>%
+    mutate(
+      prop_react_with_metab = round((n_react_with_metab/n_reactions)*100,2),
+      prop_metab = round((n_metab/n_cpd)*100,2)
+    )
+  
+}
+
+```
+
+### FUN: Visualise subsystem infos
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Plot sub-class and subsystems distribution
+sbs_plot<-function(dat = selected_sbs,
+                   category="Energy-Metabolism",
+                   decile=0,
+                   color="deepskyblue",
+                   rel_w = c(3,0.5,0.5,1,1,1),
+                   margin = c(0,0,0,0)
+                   ){
+ 
+  #(1) Map the proportion of GEMs across subsystem
+  ## Sort the categories by number of subsystems in them
+  ## Select the data for the current category  
+  
+  # Select the data for the current category  
+  # Remove sub-categories with less than 3 sbs
+  
+  sbs_info_fva_f [V4 %in% category]-> sel_sbs_info_fva
+  sel_sbs_info_fva %>% count(V5) %>% filter(n>=3) %>%
+    pull(V5) -> freq_V5
+  sel_sbs_info_fva[V5 %in% freq_V5] -> sel_sbs_info_fva
+  sel_sbs_info_fva %>%
+    group_by(V5) %>% 
+    summarise(n_sbs=n()) %>%
+    arrange(n_sbs) %>% pull(V5) -> V5_abud_sorting_vec
+
+  # Define the alternate colors vector based on the sorted category name
+  col_vec= rep(c(color, "gray30"), length.out = length(V5_abud_sorting_vec))
+  names(col_vec)=V5_abud_sorting_vec
+  
+  ## Define the a transparent version
+  col_vec_transparent = rep(
+  c(alpha(color, 0.3),
+    alpha("gray30", 0.3)),
+  length.out = length(V5_abud_sorting_vec))
+  names(col_vec_transparent)=V5_abud_sorting_vec
+
+  # Plot number of subsystems in gems by subcategory
+  subs_annot3 %>%
+  filter(V5 %in% freq_V5) %>%
+  group_by(V5, OTU) %>%
+  count %>%
+    ggplot(
+      aes(y=factor(V5, levels = V5_abud_sorting_vec),
+          x=n,
+          #fill = factor(V5, levels = V5_abud_sorting_vec),
+          color = factor(V5, levels = V5_abud_sorting_vec)
+      )) +
+    #geom_bar(stat="identity", color = "black", width = 0.9) + 
+    #geom_jitter(shape = 1, alpha = 0.05) +
+    geom_boxplot(outliers = F) +
+    scale_fill_manual(values = col_vec_transparent) +
+    scale_color_manual(values = col_vec) +
+
+    theme_bw() +
+    theme(axis.title.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.title.x = element_blank(),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.text.y = element_text(hjust = 1, size = 13),
+          plot.title = element_blank(),
+          legend.position = "none",
+          plot.margin = margin(c(0,0,0,10))
+          ) +
+    ggtitle("N° of \nsubsystems")->p1;p1
+  
+  # Plot sum of reactions in gems by subcategory
+  sbs_fva_ox_categories_f %>% 
+  filter(V5 %in% freq_V5) %>%
+  group_by(V5, OTU) %>%
+  summarise(n_unique_react = length(unique(react_id))) %>%
+    ggplot(
+      aes(y=factor(V5, levels = V5_abud_sorting_vec),
+          x=n_unique_react,
+          #fill = factor(V5, levels = V5_abud_sorting_vec),
+          color = factor(V5, levels = V5_abud_sorting_vec)
+      )) +
+    geom_boxplot(outliers = F) +
+    scale_fill_manual(values = col_vec_transparent) +
+    scale_color_manual(values = col_vec) +
+
+    theme_bw() +
+    theme(axis.text.y = element_blank(),
+          axis.title.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.title.x = element_blank(),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          #plot.title = element_text(size=10, face="plain"),
+          plot.title = element_blank(),
+          legend.position = "none",
+          plot.margin = margin(margin)
+          ) +
+    ggtitle("N° of \nsubsystems")->p2;p2
+  
+  # Avg number of reactions in sbs, by flux (f0f1) and category
+  sel_sbs_info_fva %>%
+    select(V5, mean_sum_active, mean_sum_inactive) %>%
+    pivot_longer(cols = c("mean_sum_active", "mean_sum_inactive")) %>%
+    group_by(V5,name) %>%
+    summarise(mean=mean(value)) %>%
+    mutate(prop = mean/sum(mean)*100) %>%
+    ggplot(aes(y=factor(V5, levels = V5_abud_sorting_vec),
+               x = prop,
+               fill = factor(V5, levels = V5_abud_sorting_vec),
+               alpha = name
+               )) +
+    geom_bar(stat = "identity", color = "black", width = 0.9) +
+    scale_fill_manual(values = col_vec) +
+    scale_alpha_manual(values = c(1, 0.3)) +
+    scale_x_continuous(expand = c(0, 2)) +
+    theme_bw() +
+    theme(
+          legend.position = "none",
+          axis.title.y = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.title.x = element_blank(),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          #plot.title = element_text(size=10, face="plain"),
+          plot.title = element_blank(),
+         plot.margin = margin(margin)
+          )  +
+    ggtitle("N° reactions")-> p3;p3
+  
+  sel_sbs_info_fva %>%
+    ggplot(aes(y=factor(V5, levels = V5_abud_sorting_vec),
+               x=n_gems,
+               fill=factor(V5, levels = V5_abud_sorting_vec)
+               )) +
+    geom_jitter(aes(size=mean_n_react), 
+                height = 0.3, shape = 21) + 
+    scale_x_continuous(breaks = c(0, 75 , 155, 230, 311)) +
+    scale_fill_manual(values = col_vec,
+                      guide = "none") +
+    scale_size_continuous(name = "Avg. n° of reactions \nin subsystem") +
+    theme_bw() +
+    theme(axis.text.y = element_blank(),
+          legend.position = "bottom",
+          axis.title.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.title.x = element_blank(),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title = element_blank(),
+          plot.margin = margin(c(0,0,0,0)),
+          legend.key.width = unit(1, "cm")
+          ) +
+    ggtitle("") -> p4;p4
+
+  # Arrange
+  require(cowplot)
+  plot_grid(p1, p2, p3, p4, align = "h",
+            nrow = 1,
+            rel_widths = rel_w
+            )
+}
+
+sbs_plot(category = "Energy-Metabolism", decile = 0, color = "firebrick4", rel_w = c(0.5,0.3,0.3, 0.5)) -> p1;p1
+
+```
+
+## Supp. file 5 - subsystems distribution
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+sbs_info_fva_f %>% 
+  dplyr::select(ID, V4, V5, Name, reaNr, spontNr, prop_gems, mean_n_react, f1_prop) %>%
+  dplyr::rename(
+    "Subsystem ID" = ID,
+    "Category" = V4,
+    "Sub-category" = V5,
+    "Subsystem name" = Name,
+    "Expected number of enzymatic reactions" = reaNr,
+    "Expected number of spontaneous reactions" = spontNr,
+    "Proportion of GEMs with the subsystem (%)" = prop_gems,
+    "Avg. number of reactions" = mean_n_react,
+    "Avg. proportion of reactions with flux≠0 (%)" = f1_prop
+  ) -> sbs_OTU_distribution_nice
+
+merge(summary_sbs_category, summary_sbs_react_category, by = "V4") %>%
+  arrange(desc(sbs_mean)) %>%
+  dplyr::rename(
+    "Category" = V4,
+    "Avg. number of subsystems" = sbs_mean,
+    "Number of unique subsystems" = n_unique_sbs,
+    "Avg. number of reactions" = mean_react,
+    "Number of unique reactions" = n_unique_reacts) -> summary_category_nice
+
+wb <- createWorkbook()
+cat="Overview"
+addWorksheet(wb, cat)
+writeData(wb, cat,
+          x = summary_category_nice)
+
+cat="Biosynthesis"
+addWorksheet(wb, cat)
+writeData(wb, cat,
+          x = sbs_OTU_distribution_nice %>% filter(Category == cat))
+cat="Degradation"
+addWorksheet(wb, cat)
+writeData(wb, cat,
+          x = sbs_OTU_distribution_nice %>% filter(Category == cat))
+cat="Energy-Metabolism"
+addWorksheet(wb, cat)
+writeData(wb, cat,
+          x = sbs_OTU_distribution_nice %>% filter(Category == cat))
+openxlsx::saveWorkbook(wb, file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/Supplementary file 6 - subsystems_5mar25.xlsx", overwrite = T)
+
+sbs_OTU_distribution_nice %>% filter(!Category %in% 
+                                       c("Biosynthesis", "Degradation", "Energy-Metabolism")) %>%
+  fwrite(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/Supplementary file 6 - other_subsystems_18mar25.tsv", sep = "\t", dec = ",")
+```
+
+## Supp. file 5 Summary of subcategoriess
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+sbs_info_fva_f %>% pull(V5) %>% unique -> all_subcat
+job::job({
+  foreach(i = all_subcat[]) %do% {
+    print(i)
+    sbs_dist_report(i) -> sbs_rep
+    sbs_rep_stats(sbs_rep)
+  } %>% rbindlist -> sbs_rep_summary_all
+
+sbs_rep_summary_all %>%
+  mutate(metab_prop = (n_metab/n_cpd)*100) -> sbs_rep_summary_all
+
+names(sbs_rep_summary_all)
+sbs_rep_summary_all %>%
+  select(category, sub_category,
+         n_subsystems, n_reactions,
+         prop_react_with_metab, prop_f1_react,
+         median_n_sbs, median_n_reacts) %>%
+  rename(
+    "Top-category" = category,
+    "Sub-category" = sub_category,
+    "Number of unique subsystems" = n_subsystems,
+    "Number of unique reaction" = n_reactions,
+    "Proportion of reactions with flux ≠ 0" = prop_f1_react,
+    "Median n° of subsystems" = median_n_sbs,
+    "Median n° of reactions" = median_n_reacts
+  ) %>%
+  fwrite("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/Supplementary file 5 - subsystems_subcat 9apr25.tsv")
+})
+```
+
+##Fig. 4: Visual summaries
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+#hcl.colors(palette = "RdYlGn", n = 6, alpha = 0.8) %>% scales::show_col()
+# Plot summary
+sbs_plot(category = "Biosynthesis", decile = 0, color = "firebrick2", rel_w = c(0.7,0.3,0.3, 1)) -> p1;p1
+
+ggsave(plot = p1 + theme(plot.margin = margin(0, 0, 0, 10)) ,
+       height = 10,
+       width = 26,
+       units = "cm",dpi = 600,
+       scale = 1.5,
+       filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/biosynthesis_sbs_16apr25.png")
+
+sbs_plot(category = "Energy-Metabolism", 
+         decile = 0,
+         color = "#E78200CC",
+         rel_w = c(0.61,0.3,0.3, 0.98)) -> p3;p3
+ggsave(plot = p3 + theme(plot.margin = margin(0, 0, 0, 11)),
+       height = 10,
+       width = 26,
+       units = "cm",dpi = 600,scale = 1.5,
+       filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/energy_metabolism_sbs_16apr25.png")
+
+subs_annot3 %>% filter(V4 == "Degradation") -> selected_sbs
+sbs_plot(category = "Degradation", decile = 0, color = "#6AAB44CC", rel_w = c(0.7,0.3,0.3, 1)) -> p2;p2
+ggsave(plot = p2 + theme(plot.margin = margin(0, 0, 0, 10)),
+       height = 10,
+       width = 26,
+       units = "cm",dpi = 600,scale = 1.5,
+       filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/degradation_sbs_16apr25.png")
+```
+
+## PCA on SBS
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Prepare subsystem presence-absence matrix 
+subs_annot3 %>% as.data.frame %>%
+  select(OTU, Name) %>% 
+  add_column(pres=1) %>%
+  pivot_wider(names_from = OTU, values_from = pres, values_fill = as.numeric(0)) %>% 
+  column_to_rownames("Name") %>%
+  as.matrix %>% t -> subs_annot3_mat
+rownames(subs_annot3_mat)
+
+# Calculate PCA
+subs_annot3_mat[] %>% prcomp(scale. = F) -> pca
+
+pca$x %>% as.data.frame -> comp
+
+comp[mag_analysis$OTU,"condition_higher_abund"] = mag_analysis$condition_higher_abund %>%
+  factor(levels = unique(mag_analysis$condition_higher_abund)[c(2,1,3)],
+         labels = c("Restored", "Natural", "ns")
+         ) %>% as.character
+comp[mag_analysis$OTU,"Phylum"] = mag_analysis$Phylum %>% str_remove("p__")
+
+ggplot(comp,aes(x=PC1,y=PC2, color=Phylum)) + 
+  geom_point(size=2) +
+  theme_minimal() -> gg_pca_sbs_phy;gg_pca_sbs_phy
+
+ggplot(comp,aes(x=PC1,y=PC2, color=condition_higher_abund)) + 
+  geom_point(size=2) +
+  theme_minimal()-> gg_pca_sbs_diff
+
+```
+### Fig. 5 PCA of GEMs by subsystem
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+load(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/tax/tree_colors_14apr25_sorted_factor.RData")
+names(saltmarsh_colors) = c("Restored", "Natural", "ns")
+
+ggplot(comp,aes(x=PC1, 
+                y=PC2,
+                fill=factor(Phylum, levels =sorted_phyla))) + 
+  geom_point(size=3, shape = 21) +
+  scale_fill_manual(values = tree_colors) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        legend.key.height = unit(0.5, "lines"),
+        legend.key.width = unit(0.5, "lines"),
+        text = element_text(size = 13),
+        legend.text = element_text(size = 8),
+        plot.title = element_text(face = "bold", size = 20, hjust = -0.1)
+
+        ) +
+  guides(fill = guide_legend(title = NULL)) +
+  ggtitle("A") -> gg_pca_sbs_phy;gg_pca_sbs_phy
+
+ggplot(comp,aes(x=PC1,y=PC2,
+                fill=factor(
+                  condition_higher_abund,
+                  levels=names(saltmarsh_colors)
+                  ))) + 
+  geom_point(size=3, shape = 21) +
+  scale_fill_manual(values = alpha(saltmarsh_colors, 0.8)) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        text = element_text(size = 13),
+        plot.title = element_text(face = "bold", size = 20, hjust = -0.1),
+        ) +
+  guides(fill = guide_legend(title = NULL)) +
+  ggtitle(label = "B") -> gg_pca_sbs_diff;gg_pca_sbs_diff
+
+require(patchwork)
+(gg_pca_sbs_phy + gg_pca_sbs_diff) -> gg_sbs_pca
+
+ggsave(filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/subsystems_pca_phylum_diff_16apr25.png",
+       plot = gg_sbs_pca, dpi = 300, width = 12, height = 6)
+
+```
+
+### Test association with tax and diff
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+vegan::envfit(pca$x[,1:2], comp$Phylum, perm = 999)
+vegan::envfit(pca$x[,1:2], comp$Class, perm = 999)
+vegan::envfit(pca$x[,1:2], comp$condition_higher_abund, perm = 999)
+#r2 value indicates the proportion of total variation explained by your grouping variable(s)
+
+# Random
+vegan::envfit(pca$x[,1:2], sample(comp$Phylum), perm = 999)
+vegan::envfit(pca$x[,1:2], sample(comp$condition_higher_abund), perm = 999)
+```
+
+##+++
+###Biosynthesis
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+options(dplyr.print_min = 250)
+
+# Check subsystems in main categories
+################################################################################
+sbs_dist_report("Secondary-Metabolite-Biosynthesis") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+
+mag_analysis[OTU %in% sbs_react2[sbs == "PWY-8126", OTU]]
+
+################################################################################
+sbs_dist_report("Cofactor-Biosynthesis") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>70 & n_gems>15] 
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>70 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Amino-Acid-Biosynthesis") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Lipid-Biosynthesis") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Carbohydrates-Biosynthesis") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Aromatic-Compounds-Biosynthesis") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>70 & n_gems>15] 
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Nucleotide-Biosynthesis") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Cell-Structure-Biosynthesis") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Hormone-Synthesis") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+```
+
+###Degradation
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Check the entire category
+sbs_info_fva_f[V4 == "Degradation"] %>% pull(V5) %>% table %>% sort -> all_subcat
+#sbs_dist_report(names(all_subcat)) -> sbs_rep_all
+#sbs_rep_all$sbs_info[avg_compl>50 & f1_prop>70 & n_gems>15] 
+
+# Check subsystems in main categories
+################################################################################
+sbs_dist_report("Aromatic-Compounds-Degradation") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Amino-Acid-Degradation") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+
+################################################################################
+sbs_dist_report("Carbohydrates-Degradation") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+
+mag_analysis[OTU %in% sbs_react2[sbs == "PWY-6784", OTU]]
+################################################################################
+sbs_dist_report("Carboxylates-Degradation") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Fatty-Acid-and-Lipid-Degradation") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Noncarbon-Nutrients") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Amine-Degradation") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("C1-Compounds") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Alcohol-Degradation") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Nucleotides-Degradation") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+```
+
+###Energy-Metabolism
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+options(dplyr.print_min = 250)
+
+# Check the entire category
+sbs_info_fva_f[V4 == "Energy-Metabolism"] %>% pull(V5) %>% table %>% sort -> all_subcat
+#sbs_dist_report(names(all_subcat)) -> sbs_rep_all
+#sbs_rep_all$sbs_info[avg_compl>50 & f1_prop>70 & n_gems>15] 
+
+# Check susbsytems in main categories
+################################################################################
+sbs_dist_report("Fermentation") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Respiration") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+sbs_dist_report("Unclassified") -> sbs_rep
+sbs_dist_report("TCA-Variants") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+
+sbs_dist_report("Glycolysis-Variants") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+################################################################################
+
+sbs_dist_report("Pentose-Phosphate-Cycle") -> sbs_rep
+sbs_rep_stats(sbs_rep) -> sbs_rep_summary;sbs_rep_summary
+
+sbs_rep$sbs_info[avg_compl>50 & f1_prop>50 & n_gems>15] 
+sbs_rep$sbs_info 
+  
+sbs_rep$react_info 
+sbs_rep$metab_react_info 
+```
+
+### Detoxification
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+options(dplyr.print_min = 250)
+
+# Check the entire category
+sbs_info_fva_f[V4 == "Detoxification"] %>% pull(V5) %>% table %>% sort -> all_subcat
+#sbs_dist_report(names(all_subcat)) -> sbs_rep_all
+#sbs_rep_all$sbs_info[avg_compl>50 & f1_prop>70 & n_gems>15] 
+
+################################################################################
+```
+
+
+# ----
+## FBA
+GOAL: exclude metabolites that are mostly inactive
+Inactive: flux=0
+Mostly: flux !=0 OR not detected in 95% of the MAGs
+Count the number of MAGs having metabolites with 0 flux
+Exclude the metabolites that have f=0 across 95% of all MAGs
+
+### Prepare dataset 
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Select values in the presence of oxygen
+fba_res2 %>%
+    filter(sim_O2) -> fba_ox
+
+# Fill in missing values
+fba_ox %>%
+    dplyr::select(id, OTU, f) %>%
+  complete(id, OTU, fill = list(f=0)) -> fba_ox_filled
+```
+
+### Count positive and negative exchanges
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Extract the sign for every flux
+fba_ox_filled %>%
+  dplyr::select(OTU, id, f) %>%
+  group_by(id) %>%
+  mutate(sign=sign(f)) -> flux_sign
+
+# Summarise proportions 
+flux_sign %>%
+  dplyr::select(OTU, id, f, sign) %>%
+  group_by(id) %>%
+  summarise(
+         pos=sum(sign>0),
+         neg=sum(sign<0),
+         zero=sum(sign==0),
+         nmag=pos+neg+zero,
+         prop_pos = round((pos/nmag)*100,2),
+         prop_neg = round((neg/nmag)*100,2),
+         prop_zero = round((zero/nmag)*100,2),
+         ) -> flux_sign_prop
+
+# Filter out rare exchanges
+flux_sign_prop %>%
+  arrange(zero) %>% filter(prop_zero <= 95) -> flux_sign_prop_f
+
+# Test significance
+flux_sign_prop_f %>%
+  rowwise() %>%
+  mutate(chisq = 
+           if(pos>=5|neg>=5){
+           chisq.test(c(pos, neg))$p.value
+           }else{NA}
+  ) -> flux_sign_prop_chi
+
+# Classify substrates, products, mixed
+flux_sign_prop_chi %>%
+  mutate(
+    type=case_when(
+      chisq>0.05 ~"Mixed",
+      chisq<=0.05 & pos>neg ~ "Product",
+      chisq<=0.05 & pos<neg ~ "Substrate"
+              )
+  )->flux_sign_prop_chi_class
+
+flux_sign_prop_chi_class$type %>% table
+```
+
+### Summarise 
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+fba_ox %>% 
+  filter(id %in% flux_sign_prop_chi_class$id) %>%
+  group_by(id, formula, is_core, n_C, noC) %>% 
+  summarise(
+    n_mag=n(),
+    median_f=median((f)),
+    median_no0 = median(f[f != 0], na.rm = TRUE), # Median of non-zero values
+    median_pos = median(f[f > 0], na.rm = TRUE), # Median of non-zero values
+    median_neg = median(f[f < 0], na.rm = TRUE), # Median of non-zero values
+    mean_f=mean((f)),
+    abs_median_f=median(abs(f)),
+    abs_mean_f=mean(abs(f)),
+    max_f=max(f),
+    min_f=min(f),
+    devsd=sd(f)
+    ) %>% ungroup -> fba_summary_ox
+
+fba_summary_ox %>%
+  merge(flux_sign_prop_chi_class %>% 
+          dplyr::select(id, type, neg, pos,prop_pos, prop_neg, prop_zero)
+        )-> fba_summary_ox2
+```
+
+
+
+### Annotate metabolites with names and dbs
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_annots %>% 
+  dplyr::select(id, name, hmdbID, keggID) %>% unique -> metabolite_names
+
+# Assign hmdb and kegg IDs 
+metabolite_names %>% 
+  merge(fba_summary_ox2, by = "id") -> fba_summary_ox3
+
+fba_summary_ox3 %>%
+  mutate(
+    hmdb_kegg = 
+      case_when(hmdbID == "" ~ keggID, .default = keggID),
+    .after = "keggID") -> fba_summary_ox4
+
+# Export for manual curation
+fwrite(fba_summary_ox4,
+       "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/fba_summary_ox_04mar25.tsv",
+       sep = "\t", dec = "," )
+```
+
+### Add molecular classification
+```{r, echo = FALSE, warning=F, message=FALSE}
+# Import classes
+fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/fba_summary_ox_curated_30dec24.tsv") %>%
+  dplyr::select(id, subclass)-> hmdb_classes
+
+fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/fba_summary_ox_31dec24.tsv",
+       sep = "\t", dec = "," ) -> fba_summary_ox4
+
+merge(hmdb_classes, fba_summary_ox4, by = "id") -> fba_summary_ox5
+```
+
+### Annotate low - medium - high flux
+```{r, echo = FALSE, warning=F, message=FALSE}
+options(scipen = 999)
+abs(fba_summary_ox5$median_no0) %>% quantile(probs = seq(0,1, 0.1))
+options(scipen = 0)
+
+# Splitting at the 60% percentile into "high" and "low" for visualisation purposes
+thr=0.1
+
+fba_summary_ox5 %<>%
+  mutate(
+    flux_category = case_when(median_pos > thr | abs(median_neg) > thr ~ "High",
+                              median_pos <= thr | abs(median_neg) <= thr ~ "Low"
+                              ))
+
+
+```
+
+### Prepare colors for metabolite classes 
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+load(file="~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/subclass_colors.Rdata")
+
+c(fba_summary_ox5$subclass, 
+  names(subclass_colors)) %>% unique -> all_metabolite_subclasses
+all_metabolite_subclasses_colors<-sample(hcl.colors(length(unique(all_metabolite_subclasses)), palette = "Earth"))
+names(all_metabolite_subclasses_colors) = all_metabolite_subclasses
+save(all_metabolite_subclasses_colors, file="~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/all_metabolite_subclasses_colors.Rdata")
+```
+
+### PLOT: FBA heatmaps
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+fba_summary_ox5$type %>% table
+fba_summary_ox5$flux_category %>% table
+fba_summary_ox5$type %>% unique -> types
+flux_type=types[1];flux_type
+fcat="Low"
+
+
+for(flux_type in types){
+  for(fcat in c("Low", "High")){
+# Get the matrices 
+foreach(i = types)%do%{
+  flux_sign %>% 
+    merge(
+      fba_summary_ox5) %>%
+    filter(type==flux_type & flux_category == fcat) %>%
+    dplyr::select(OTU, name, sign) %>%
+    pivot_wider(names_from = OTU, 
+                values_from = sign) %>%
+    column_to_rownames("name") %>%
+    as.matrix()
+} -> flux_mat_types_list
+names(flux_mat_types_list) = types
+
+# Add row annotation
+## Set right annotation as bars 
+### Prepare annotation dataset
+# Data for sign proportions
+
+fba_summary_ox5 %>% 
+  filter(type==flux_type & flux_category == fcat) %>%
+  dplyr::select(name, prop_pos, prop_neg, prop_zero) %>% column_to_rownames("name") -> props
+annot_props_pos=props$prop_pos
+names(annot_props_pos)=props$name
+
+# Data for median flux values
+fba_summary_ox5 %>% 
+  filter(type==flux_type & flux_category == fcat) %>%
+  dplyr::select(name, median_pos, median_neg) -> median
+annot_median_pos=median$median_pos
+names(annot_median_pos)=median$name
+
+annot_median_neg=median$median_neg
+names(annot_median_pos)=median$name
+
+### Set annotation parameters
+right_annot<-
+rowAnnotation(
+  "Proportion\n of MAGs" = 
+    anno_barplot(
+      x = props,
+      gp = gpar(fill=hcl.colors(3, palette = "Tropic", rev = F)[c(1,3,2)]),
+      axis_param = list(labels_rot = 45,
+                        gp = gpar(fontsize = 6)
+                        )
+      ),
+  "Positive flux \n median" = 
+    anno_barplot(x = annot_median_pos,
+                 axis_param = list(labels_rot = 90,
+                                   gp = gpar(fontsize = 6)
+                                   ),
+                 ),
+  "Negative flux \n median" = 
+    anno_barplot(x = annot_median_neg,
+                 axis_param = list(labels_rot = 90,
+                                   gp = gpar(fontsize = 6)
+                                   ),
+                 ),
+  show_legend = F,
+  annotation_name_rot = 60,
+  annotation_name_side = "top",
+  annotation_name_gp = gpar(fontsize = 10),
+  annotation_name_offset = unit(0.3, "cm")
+  )
+
+## Set left annot as colored bars
+### Prepare annotation dataset
+fba_summary_ox5 %>% 
+  filter(type==flux_type & flux_category == fcat) %>%
+  dplyr::select(name, subclass) -> sbsc
+annot_subclass=sbsc$subclass %>%
+  factor(levels = unique(sbsc$subclass))
+
+# Set colors for molecular classes
+set.seed(984)
+row_col<-row_col<-all_metabolite_subclasses_colors[levels(annot_subclass)]
+
+### Set annotation parameters
+left_annot<-
+  rowAnnotation(
+  "Molecular \nclassification" = annot_subclass,
+  show_legend = F,
+  col = list("Molecular \nclassification"= row_col),
+  annotation_name_rot = 0,
+  annotation_name_gp = gpar(fontsize = 10),
+  annotation_name_offset = unit(0.3, "cm")
+  )
+
+## Set column annot as phylum-colored bars
+mag_ids<-colnames(flux_mat_types_list[[flux_type]])
+mag_analysis[OTU %in% mag_ids,] %>% dplyr::select(OTU, Phylum)
+
+mag_analysis %>%
+  arrange(match(OTU, mag_ids)) %>% 
+  pull(Phylum) %>% str_remove("p__") -> mag_ids_phylum
+
+set.seed(984)
+top_col<-tree_colors #Add a colur for the archaea
+#names(top_col) = unique(mag_ids_phylum)
+
+top_annot<-
+  columnAnnotation(
+  "GEM Phylum" = mag_ids_phylum,
+  show_legend = F,
+  col = list("GEM Phylum"= top_col),
+  annotation_name_rot = 0,
+  annotation_name_gp = gpar(fontsize = 10),
+  annotation_name_side = "left",
+  annotation_name_offset = unit(0.1, "cm"),
+  annotation_legend_param = list(
+    "GEM Phylum" = list(ncol = 2,
+                        labels_gp = gpar(fontsize = 5)))
+  )
+#top_annot<-
+#  columnAnnotation(
+#  "GEM Phylum1" = anno_mark(at = c(1), labels = "nat_SemiBin_372"))
+
+min_fontsize=12
+flux_mat_types_list[[flux_type]] %>% 
+  Heatmap(
+          col=hcl.colors(3, palette = "Tropic", rev = T),
+          cluster_rows = F,
+          cluster_columns = F,
+          show_row_names = T,
+          row_names_side = "right", 
+          row_names_gp = gpar(fontsize=min_fontsize),
+          left_annotation = left_annot,
+          right_annotation = right_annot,
+          rect_gp = gpar(col = "white", lwd = 0.1),
+          row_split = annot_subclass,
+          gap = unit(0.5, "mm"),  
+          row_title_gp = gpar(fontsize = min_fontsize + 2),
+          row_title_side = "left",
+          row_title_rot = 0,
+          
+          # Top annotation
+          column_split = mag_ids_phylum,
+          show_column_names = F,
+          top_annotation = top_annot,
+          column_title_gp = gpar(fontsize = 0),
+          column_title_rot = 60, 
+          column_names_rot=60,
+          column_names_gp = gpar(fontsize=0),
+          column_names_centered = TRUE,
+          column_names_max_height = unit(4, "cm"),
+          column_gap = unit(0, "cm"),
+          use_raster = F,
+          show_heatmap_legend = F, #Remove legend
+          heatmap_legend_param = list(
+            title = "Flux sign",  # Set legend title
+            legend_direction = "horizontal",    # Set legend position
+            legend_width = unit(1, "cm")),       # Set legend size if horizontal
+          height = unit(0.2*nrow(props), "in"),  # Adjust heatmap height 5
+          width = unit(5, "in")   # Adjust heatmap width
+  ) -> hm_out
+#draw(hm_out, heatmap_legend_side = "bottom")
+
+png(filename = 
+      paste0(
+      "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/heatmap_flux_bymag_",
+      flux_type, "_", fcat, ".png"), width = 15, height = 0.2*nrow(props)+3, units = "in", res = 600)
+draw(hm_out, heatmap_legend_side = "bottom", annotation_legend_side = "bottom")
+dev.off()
+}
+}
+```
+
+### Supplementary: FBA analysis
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+names(fba_summary_ox5)
+fba_summary_ox5 %>%
+  mutate(
+    type = factor(type, levels = unique(type), labels = c("Mixed","Consumed","Produced"))
+    )  %>%
+  dplyr::select(name, subclass, formula, n_C, pos, neg, median_pos, median_neg, mean_f, devsd, type, flux_category) %>%
+  dplyr::rename(
+    Metabolite=name,
+    "Molecular Classification" = subclass,
+    Formula = formula,
+    "# Carbons" = n_C,
+    "Number of GEMs with positive flux" = pos,
+    "Number of GEMs with negative flux" = neg,
+    "Median value of positive fluxes (mmol/(gDW*hr))" = median_pos,
+    "Median value of negative fluxes (mmol/(gDW*hr))" = median_neg,
+    "Mean flux across all GEMs (mmol/(gDW*hr))" = mean_f,
+    "Standard deviation of flux across all GEMs (mmol/(gDW*hr))" = devsd,
+    "Dominant use across all GEMs" = type,
+    "Flux Intensity Category" = flux_category
+  ) -> fba_summary_ox5_nice
+
+fba_summary_ox5_nice %>%
+  fwrite(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/Supplementary Table 4 - FBA_summary_table.csv", sep = ";", dec = ",")
+
+```
+
+## FBA summaries
+### Distribution of metabolites in flux categories
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+fba_summary_ox5 %>% group_by(type, flux_category) %>% count(type)
+
+fba_summary_ox5 %>%
+  filter(
+    type == "Substrate" &
+    flux_category == "High"
+      ) %>%
+  dplyr::select(name, subclass, prop_pos, prop_neg, prop_zero, median_neg)
+
+```
+#----
+# Summary of models
+## Avg number of metabolites, reactions, subsystems
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Avg # of metabolites in the models
+models_metabolites  %>% 
+  count(OTU, sort = T) %>% 
+  summarise(mean=mean(n), sd=sd(n))
+
+# Avg # of exchanged metabolites 
+fba_ox  %>% 
+  count(OTU, sort = T) %>% 
+  summarise(mean=mean(n), sd=sd(n))
+
+# Avg # of reactions
+models_reactions %>%
+  count(OTU) %>% 
+  summarise(mean=mean(n), sd=sd(n))
+
+# Avg # of genes
+models_genes %>%
+  count(OTU) %>% 
+  summarise(mean=mean(n), sd=sd(n))
+
+# Avg # of non-transport reactions
+fva_res %>% 
+  filter(sim_O2)  %>% 
+  count(OTU, sort = T) %>% 
+  summarise(mean=mean(n), sd=sd(n))
+
+# Avg # of active reactions
+fva_res %>% 
+  filter(sim_O2) %>% 
+  filter(min.flux !=0 & max.flux !=0) %>% 
+  count(OTU, sort = T) %>% 
+  summarise(mean=mean(n), sd=sd(n))
+
+#Avg number of subsystems
+subs_annot3 %>%
+  count(OTU) %>% 
+  summarise(mean=mean(n),
+            sd=sd(n)
+            )
+# Number of unique subsystems
+subs_annot2$ID %>% unique %>% length
+```
+#----
+# INTEGRATION WITH METAB
+# METAB + FBA
+## Merge FBA and metaB metabolites
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+rbind(
+fba_summary_ox5 %>%
+  dplyr::select(id, subclass, name) %>%
+  add_column(source="FBA", name_orig = NA),
+matched1 %>%
+  dplyr::select(id, subclass, name, name_orig)%>%
+  add_column(source="Metab")) %>%
+  group_by(id, subclass, name) %>% 
+  unique %>%
+  reframe(source=paste0(source, collapse = ";")) %>%
+  as.data.table-> all_metabolites
+
+# Correct metabolites with multiple IDs
+metab_annots %>%
+  filter(grepl("Inulin", name, ignore.case=T))
+  paste0(c("cpd11602","cpd27312","cpd28763"), collapse = "|")->correction
+  all_metabolites[grepl("Inulin", name)]$id=correction
+
+metab_annots %>%
+  filter(grepl("Dihydroxypropane-1-sulfonate", name, ignore.case=T))
+  paste0(c("cpd23538","cpd31356"), collapse = "|")->correction
+  all_metabolites[grepl("Dihydroxypropane-1-sulfonate", name)]$id=correction
+
+metab_annots %>%
+  filter(grepl("starch", name, ignore.case=T)) %>% dplyr::select(id, abbreviation)
+  paste0(c("cpd11657","cpd28193","cpd90003", "cpd90004"), collapse = "|")->correction
+all_metabolites[grepl("starch", name)]$id=correction
+
+all_metabolites->all_metabolites_corrected
+#################################################################################
+```
+
+## Sanity checks
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+all_metabolites_corrected %>% filter(grepl("FBA", source) & !grepl("Metab", source)) ->fba_met
+all_metabolites_corrected %>% filter(grepl("Metab", source) & !grepl("FBA", source)) ->metab_met
+all_metabolites_corrected %>% filter(source == "FBA;Metab")->fbametab_met
+
+# Which matched1 has 136 metabolites, and all_metabolites_corrected 132?
+setdiff(metab_met$id, matched1$id) #no metabolites are lost 
+table(duplicated(matched1$id)) # there are duplicates
+
+```
+
+## Compare FBA and metab
+### Distribution of FBA metabolites by molecular category
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+# Dist of all FBA cpds
+fba_summary_ox5 %>% 
+  group_by(subclass) %>% 
+  count(sort = T) %>%
+  ungroup %>% 
+  mutate(prop= round(n/sum(n),3)*100) -> fba_summary_ox5_subclass_count
+
+fba_summary_ox5_subclass_count %>% nrow
+
+# Dist of all FBA+metaB
+fbametab_met %>%
+    group_by(subclass) %>% 
+    count(sort = T) %>%
+    ungroup %>% 
+  mutate(prop= round(n/sum(n),3)*100)
+
+# Dist of all FBA only
+fba_met %>%
+    group_by(subclass) %>% 
+    count(sort = T) %>%
+    ungroup %>% 
+    mutate(prop= round(n/sum(n),3)*100)
+
+# Dist of all METAB only
+metab_met %>%
+    group_by(subclass) %>% 
+    count(sort = T) %>%
+    ungroup %>% 
+    mutate(prop= round(n/sum(n),3)*100)
+
+# Comparison between METAB and FBA cpd count by subclass
+all_metabolites_corrected %>%
+  group_by(id, name,subclass) %>%
+reframe(source = unlist(strsplit(source, ";"))) %>%
+  group_by(subclass, source) %>% 
+  count %>% pivot_wider(names_from = source, values_from = n, values_fill = 0) %>% 
+  mutate(diff = Metab-FBA) 
+```
+## +++
+## METAB + REACT + SBS
+## Datasets description 2
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+###### IMPORTANT OBJECTS ########
+# all subsystems considered with full hierarchy
+# for each gem
+subs_annot3
+
+# long form matrix with the association between subsytems and reaction
+# for each gem
+sbs_react2
+
+# addition to sbs_react2 with all the FVA values foreach reactions
+# and subsytem hierarchy
+# for each gem
+sbs_fva_ox_categories_f
+
+# sbs by category and sub-category,
+# distribution across GEMs, expected number of reactions
+# min, max, median number of reaction and total across all GEMS
+# median number of active and inactive reactions
+sbs_info_fva_f
+#################################
+```
+
+## Prepare dataset
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Add cpd ids to sbs+react
+sbs_fva_ox_categories_f %>% 
+  merge(reaction_db_simple %>% 
+          dplyr::select(react_id2,react_name, definition, compound_ids), by = "react_id2") -> sbs_fva_ox_categories_f2
+
+# Check number of react so far
+sbs_fva_ox_categories_f2$react_id2 %>% unique %>% length
+
+# Collapse all METAB IDs into a string
+metab_cpds[,id] -> metab_vec
+paste0(metab_vec, collapse = "|")->metab_string
+
+# Filter reactions with any of the cpds
+sbs_fva_ox_categories_f2[grepl(metab_string, compound_ids)] -> metab_reacts
+metab_reacts$react_id %>% unique %>% length
+
+# For each metabolite, find corresponding reactions and  subsystems 
+foreach(i = metab_vec) %do%{
+  metab_cpds[id == i] -> sel_metab
+  print(sel_metab[,name])
+  metab_reacts[grepl(i, compound_ids)]-> sel_reacts
+  if(nrow(sel_reacts) == 0){
+    sel_reacts %>% add_row %>%
+    add_column(
+      metab_id = i,
+      metab_name = paste0(sel_metab[,name], collapse = ";"),
+      metab_subclass = unique(sel_metab[,subclass]))
+  }else{
+    sel_reacts %>% 
+    add_column(
+      metab_id = i,
+      metab_name = paste0(sel_metab[,name], collapse = ";"),
+      metab_subclass = unique(sel_metab[,subclass]))
+    }
+} %>% rbindlist -> metab_reacts2
+
+metab_reacts2[is.na(react_id2)] -> metab_reacts2_no_react
+metab_reacts2[!is.na(react_id2)] -> metab_reacts2
+#Fix metab names
+metab_reacts2 %<>%
+  mutate(metab_name =
+           str_replace(
+             metab_name,
+             "trans-4-Hydroxy-L-proline;trans-4-Hydroxy-L-proline",
+             "trans-4-Hydroxy-L-proline"))
+
+```
+
+## CHECK and summarise involved sbs and reactions
+### Count n° reactions 
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Total number of reactions
+metab_reacts2$react_id2 %>% unique %>% length
+
+# Number of unique metabolites
+metab_reacts2$metab_name %>% unique
+
+# Number of reactions by metabolite
+metab_reacts2 %>%
+  group_by(metab_subclass, metab_name) %>%
+  summarise(n_unique_react = length(unique(react_id))) %>%
+  arrange(desc(n_unique_react)) %>% 
+  ungroup %>%
+  mutate(prop=n_unique_react/sum(n_unique_react)*100) -> metab_name_react_count
+
+# Number of reactions by metabolite subcategory
+metab_reacts2 %>%
+  group_by(metab_subclass) %>%
+  summarise(n_unique_react = length(unique(react_id))) %>%
+  arrange(desc(n_unique_react)) %>% 
+  ungroup %>%
+  mutate(prop=n_unique_react/sum(n_unique_react)*100) -> metab_subclass_react_count
+
+# Number of reactions by subsystem 
+metab_reacts2 %>%
+  group_by(V4, V5, Name) %>%
+  count(sort = T) %>%
+  ungroup %>%
+  mutate(prop=round(n/sum(n)*100,3))  -> metab_sbs_react_count
+
+# Number of unique subsystems involved
+metab_sbs_react_count$Name %>% length
+
+# Number of reactions by subsystem subcategory
+metab_reacts2 %>%
+  group_by(V4, V5) %>%
+  count(sort = T) %>%
+  ungroup %>%
+  mutate(prop=round(n/sum(n)*100,3)) -> metab_sbs_subclass_react_count
+
+# Number of reactions by subsystem category
+metab_reacts2 %>%
+  select(V4, V5, Name) %>% unique %>%
+  #group_by(V4) %>%
+  count(V4, sort = T) %>%
+  ungroup %>%
+  mutate(prop=round(n/sum(n)*100,3)) %>% data.table-> metab_sbs_class_react_count
+
+metab_sbs_class_react_count$n %>% sum
+
+```
+
+### Supp. file 7 - react + sbs + metab
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+full_join(react_sbs_info,
+metab_reacts2 %>%
+  group_by(react_id2) %>%
+  summarise(
+    metabolites=paste0(unique(metab_name), collapse = ";")
+)
+, by = "react_id2") %>%
+  relocate(metabolites, .after="react_name")-> react_sbs_metab_info
+
+fwrite(
+  react_sbs_metab_info,
+    file = 
+   "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/gem_reactions_17mar25.csv")
+
+names(react_sbs_metab_info)
+  react_sbs_metab_info %>%
+  select(react_id2, react_name, prop_gems, f1_prop, metabolites, definition, fmin_median, fmax_median, subsytems_ids, subystems) %>%
+  rename(
+    "Reaction name" = react_name,
+    "Proportion of GEMs with the reaction (%)" = prop_gems,
+    "Proportion of GEMs with non-zero flux reactions (%)" = f1_prop,
+    "Found metabolites" = metabolites,
+    "Reaction" = definition,
+    "Median flux min" = fmin_median,
+    "Median flux max" = fmax_median,
+    "Subsytems involved (IDs)" = subsytems_ids,
+    "Subsytems involved (Name)" = subystems
+  ) %>% fwrite(
+    file = 
+   "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/Supplementary file 7 - reactions_17mar25.csv",
+   dec = ",", sep = ";"
+  )
+
+metab_reacts2 %>%
+  group_by(metab_name) %>%
+  summarise(n_react = length(unique(react_id2)),
+            n_sbs = length(unique(ID))
+            ) %>% arrange(desc(n_react)) %>%
+  left_join(
+metab_reacts2[min.flux!=0 | max.flux!=0] %>%
+  group_by(metab_name) %>%
+  summarise(n_f1_react = length(unique(react_id2))
+            ))
+react_sbs_metab_info %<>% data.table
+react_sbs_metab_info[metabolites!="", react_id2] -> top_metab_react_ids #f1_prop>70 & prop_gems>70 & 
+#metab_reacts2[react_id2 %in% top_metab_react_ids & !is.na(V5) & V5 != "Unclassified"] %>%
+#  group_by(metab_name, V5) %>%
+#  summarise(n=length(unique())) 
+
+  
+```
+
+### FIGURE: heatmap clustering of metabolites in subclasses
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Prepare matrix
+metab_reacts2[V5 != "Unclassified" ,.(V5, react_id2, metab_name)] %>%
+  group_by(V5, metab_name) %>%
+  summarise(n_react=length(unique(react_id2))) %>%
+  #filter(n_react>2) %>%
+  pivot_wider(names_from = metab_name, values_from = n_react, values_fill = 0) %>%
+  column_to_rownames("V5") %>% as.matrix -> mat_metab_sbs
+
+mat_metab_sbs_logi = mat_metab_sbs
+mat_metab_sbs_logi[mat_metab_sbs_logi>0] = 1
+
+mat_metab_sbs_log = mat_metab_sbs
+mat_metab_sbs_log[mat_metab_sbs_log>0] = log(mat_metab_sbs_log[mat_metab_sbs_log>0])
+
+mat_metab_sbs_rcount = mat_metab_sbs %>% t
+#mat_metab_sbs_rcount[mat_metab_sbs_rcount==0]=NA
+
+# Check dims
+dim(mat_metab_sbs)
+
+# Set custom color palette
+
+# Define the palette for nonzero values
+mat<-mat_metab_sbs_rcount
+nonzero_vals <- mat[mat != 0]
+min_val <- min(nonzero_vals)
+max_val <- max(nonzero_vals)
+mean_val <- mean(nonzero_vals)
+# Create a color mapping that goes from blue to white to red
+hcl.colors(6, palette = "Mint", rev = T)
+hcl.colors(10, palette = "PuBuGn", rev = T)
+
+palette_fun <- circlize::colorRamp2(c(0, min_val, mean_val, max_val), c( "white","#7BB7A6", "#0091AD","red"))
+
+# Define a custom color function
+custom_col_fun <- function(x) {
+  cols <- palette_fun(x)
+  cols[x == 0] <- "#FFFFFF"  # set exactly 0 to white
+  return(cols)
+}
+
+# Left annotation: n°react per metabolite
+
+right_annot<-rowAnnotation(
+  "N° reactions" = 
+    anno_barplot(x = rowSums(mat),
+                 axis_param = list(labels_rot = 90,
+                                   gp = gpar(fontsize = 6)
+                                   ),
+                 annotation_name_side = "right"
+                 ),
+  annotation_name_rot = 60,
+  annotation_name_side = "top",
+  annotation_name_gp = gpar(fontsize = 10),
+  annotation_name_offset = unit(0.3, "cm")
+)
+
+bottom_annot<-columnAnnotation(
+  "N° subsytems" = 
+    anno_barplot(x = -colSums(mat),
+                 axis_param = list(labels_rot = 90,
+                                   gp = gpar(fontsize = 6),
+                                   #side = "top",         # Axis on top (since bars go downward)
+                                   facing = "outside")
+                 ),
+  annotation_name_rot = 0,
+  annotation_name_side = "left",
+  annotation_name_gp = gpar(fontsize = 10),
+  annotation_name_offset = unit(0.9, "cm")
+)
+  
+# Heatmap
+min_fontsize=3
+mat_metab_sbs_rcount %>%
+  Heatmap(
+          col= custom_col_fun, 
+          cluster_rows = T,
+          show_row_dend = F,
+          cluster_columns = T,
+          show_column_dend = F,
+          show_row_names = T,
+          row_names_side = "right", 
+          row_names_gp = gpar(fontsize=min_fontsize+4),
+          rect_gp = gpar(col = "gray90", lwd = 0.8),
+          #gap = unit(2, "mm"),
+          #row_gap = unit(2, "mm"),
+          row_title_side = "right",
+          row_title_rot = 0,
+          right_annotation = right_annot,
+          bottom_annotation = bottom_annot,
+          # Top annotation
+          show_column_names = T,
+          column_title_rot = 60, 
+          column_names_rot=60,
+          column_names_gp = gpar(fontsize=min_fontsize+4),
+          column_names_centered = F,
+          column_names_max_height = unit(4, "cm"),
+          #column_gap = unit(0, "cm"),
+          use_raster = F,
+          show_heatmap_legend = T, #Remove legend
+          heatmap_legend_param = list(
+            title = "N° of reactions",  # Set legend title
+            legend_direction = "horizontal",    # Set legend position
+            legend_width = unit(2, "cm"),
+            title_gp = gpar(fontsize = min_fontsize+2, fontface = "bold"),
+            labels_gp = gpar(fontsize = min_fontsize+2)),       # Set legend size if horizontal
+          height = unit(20, "cm"),  # Adjust heatmap height 5
+          width = unit(19, "cm")   # Adjust heatmap width
+  ) -> hm_out;hm_out
+  
+png(filename = 
+  "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/heatmap_metab_sbs_subclass_react_count_06apr25.png",   width = 28, height = 30, units = "cm", res = 600)
+draw(hm_out, heatmap_legend_side = "bottom")
+dev.off()
+
+# Heatmap with clustering only
+min_fontsize=3
+mat_metab_sbs_rcount %>%
+  Heatmap(
+          col= custom_col_fun, 
+          cluster_rows = T,
+          show_row_dend = T,
+          cluster_columns = T,
+          show_column_dend = T,
+          row_dend_width = unit(4, "cm"),
+          column_dend_height = unit(3, "cm"), 
+          show_row_names = T,
+          row_names_side = "right", 
+          row_names_gp = gpar(fontsize=min_fontsize+4),
+          rect_gp = gpar(col = "gray90", lwd = 0.8),
+          #gap = unit(2, "mm"),
+          #row_gap = unit(2, "mm"),
+          #row_title_side = "right",
+          #row_title_rot = 0,
+          #right_annotation = right_annot,
+          #bottom_annotation = bottom_annot,
+          # Top annotation
+          show_column_names = T,
+          column_title_rot = 60, 
+          column_names_rot=60,
+          column_names_gp = gpar(fontsize=min_fontsize+4),
+          column_names_centered = F,
+          column_names_max_height = unit(4, "cm"),
+          #column_gap = unit(0, "cm"),
+          use_raster = F,
+          show_heatmap_legend = T, #Remove legend
+          heatmap_legend_param = list(
+            title = "N° of reactions",  # Set legend title
+            legend_direction = "horizontal",    # Set legend position
+            legend_width = unit(2, "cm"),
+            title_gp = gpar(fontsize = min_fontsize+2, fontface = "bold"),
+            labels_gp = gpar(fontsize = min_fontsize+2)),       # Set legend size if horizontal
+          height = unit(20, "cm"),  # Adjust heatmap height 5
+          width = unit(19, "cm")   # Adjust heatmap width
+  ) -> hm_out;hm_out
+  
+png(filename = 
+  "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/heatmap_metab_sbs_subclass_hclust_29apr25.png",   width = 28, height = 30, units = "cm", res = 600)
+draw(hm_out, heatmap_legend_side = "bottom")
+dev.off()
+
+
+
+```
+
+## +++
+### FUN: check n° rections in sbs by cpd subclass
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_sbs_react_summary<-function(subclass ="Amino acids, peptides, and analogues"){
+metab_reacts2[metab_subclass == subclass] -> sel_metab_sub
+  
+# Metabolites involved  
+sel_metab_sub$metab_name %>% unique
+
+# Number of unique reactions involved  
+sel_metab_sub$react_id2 %>% unique -> sel_reacts
+sel_reacts %>% length
+
+# Reaction count by GEM
+#fva_res_ox[react_id2 %in% sel_reacts] %>%
+#  group_by(react_id2) %>% count(name = "n_gems") %>%
+#  merge(reaction_db_simple, by = "react_id2") %>%
+#    arrange(desc(n_gems)) -> metab_react_gem_count
+
+sbs_fva_ox_categories_f2[react_id2 %in% sel_reacts] %>%
+  group_by(react_id2) %>% 
+  summarise(
+    n_gems = n(),
+    subsystems = paste0(unique(Name), collapse = ";")
+  ) %>%
+  merge(reaction_db_simple, by = "react_id2") %>%
+    arrange(desc(n_gems)) %>%
+  relocate(subsystems, .after = "definition") -> metab_react_gem_count
+
+# Number of reactions matched by metab
+sel_metab_sub %>% 
+  select(metab_name, react_id) %>% 
+  group_by(metab_name) %>%
+  count %>%
+  arrange(desc(n)) %>%
+  ungroup %>%
+      mutate(prop =round(n/sum(n),3)*100)-> react_count_by_metab
+
+# Proportion of reactions in subcategory
+sbs_fva_ox_categories_f2[react_id2 %in% sel_reacts] %>%
+   group_by(V4,V5) %>% count(sort = T) %>%
+   ungroup %>%
+   mutate(prop =round(n/sum(n),3)*100)-> sel_metab_sbs_subcat;sel_metab_sbs_subcat
+
+
+# Proportion of reactions in subsystem, merged with sbs info
+sbs_fva_ox_categories_f2[react_id2 %in% sel_reacts] %>%
+   group_by(ID) %>% count(sort = T, name = "n_found_react") %>%
+   ungroup %>%
+   mutate(prop_found_react =round(n_found_react/sum(n_found_react),3)*100)-> sel_metab_sbs;sel_metab_sbs
+
+  merge(sel_metab_sbs,
+        sbs_info_fva_f, by ="ID") %>% arrange(desc(n_found_react)) %>% data.table-> sbs_summary
+
+# Sanity check: sum of proportion in sel_metab_
+sbs_summary %>% group_by(V5) %>% summarise(n=sum(prop_found_react)) %>% arrange(desc(n))
+
+  list(
+    all_react = sel_metab_sub,
+    react_summary = metab_react_gem_count,
+    all_sbs_summary = sbs_summary,
+    unique_react_count = sel_reacts %>% length,
+    react_count_by_metab=react_count_by_metab,
+    react_count_by_sbs_subcat = sel_metab_sbs_subcat
+  )
+}
+
+```
+
+### FUN: check n° rections in sbs by cpd id
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_sbs_react_summary_byid<-function(id = "cpd00093"){
+metab_reacts2[metab_id == id] -> sel_metab_sub
+  
+# Metabolites involved  
+sel_metab_sub$metab_name %>% unique
+
+# Number of unique reactions involved  
+sel_metab_sub$react_id2 %>% unique -> sel_reacts
+sel_reacts %>% length
+
+# Reaction count by GEM
+fva_res_ox[react_id2 %in% sel_reacts] %>%
+  group_by(react_id2) %>% count(name = "n_gems") %>%
+  merge(reaction_db_simple, by = "react_id2") %>%
+    arrange(desc(n_gems)) -> metab_react_gem_count
+
+# Number of reactions matched by metab
+sel_metab_sub %>% 
+  select(metab_name, react_id) %>% 
+  group_by(metab_name) %>%
+  count %>%
+  arrange(desc(n)) %>%
+  ungroup %>%
+      mutate(prop =round(n/sum(n),3)*100)-> react_count_by_metab
+
+# Proportion of reactions in subcategory
+sbs_fva_ox_categories_f2[react_id2 %in% sel_reacts] %>%
+   group_by(V4,V5) %>% count(sort = T) %>%
+   ungroup %>%
+   mutate(prop =round(n/sum(n),3)*100)-> sel_metab_sbs_subcat;sel_metab_sbs_subcat
+
+
+# Proportion of reactions in subsystem, merged with sbs info
+sbs_fva_ox_categories_f2[react_id2 %in% sel_reacts] %>%
+   group_by(ID) %>% count(sort = T, name = "n_found_react") %>%
+   ungroup %>%
+   mutate(prop_found_react =round(n_found_react/sum(n_found_react),3)*100)-> sel_metab_sbs;sel_metab_sbs
+
+  merge(sel_metab_sbs,
+        sbs_info_fva_f, by ="ID") %>% arrange(desc(n_found_react)) %>% data.table-> sbs_summary
+
+# Sanity check: sum of proportion in sel_metab_
+sbs_summary %>% group_by(V5) %>% summarise(n=sum(prop_found_react)) %>% arrange(desc(n))
+
+  list(
+    all_react = sel_metab_sub,
+    react_summary = metab_react_gem_count,
+    all_sbs_summary = sbs_summary,
+    unique_react_count = sel_reacts %>% length,
+    react_count_by_metab=react_count_by_metab,
+    react_count_by_sbs_subcat = sel_metab_sbs_subcat
+  )
+}
+
+```
+
+### Amino acids, peptides, and analogues
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_subclass_react_count
+metab_sbs_react_summary("Amino acids, peptides, and analogues") -> res
+res$unique_react_count
+res$react_summary
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+
+### Gamma-keto acids and derivatives
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_sbs_react_summary("Gamma-keto acids and derivatives") -> res
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+
+###	Dicarboxylic acids and derivatives
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_sbs_react_summary("Dicarboxylic acids and derivatives") -> res
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+
+###Beta hydroxy acids and derivatives
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_sbs_react_summary("Beta hydroxy acids and derivatives") -> res
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+
+
+### Carbohydrates and carbohydrate conjugates
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_sbs_react_summary("Carbohydrates and carbohydrate conjugates") -> res
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$react_summary %>% filter(subsystems == "NA") 
+
+res$all_sbs_summary[n_gems>15 & avg_compl>50]
+```
+
+### Short-chain keto acids and derivatives
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_sbs_react_summary("Short-chain keto acids and derivatives") -> res
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+
+###Purines and purine derivatives
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_sbs_react_summary("Purines and purine derivatives") -> res
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+
+###Pyrimidines and pyrimidine derivatives
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_sbs_react_summary("Pyrimidines and pyrimidine derivatives") -> res
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+
+###Pyrimidine ribonucleosides
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_sbs_react_summary("Pyrimidine ribonucleosides") -> res
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+
+### Benzoic acids and derivatives
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_sbs_react_summary("Benzoic acids and derivatives") -> res
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+
+### Alkanes
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_sbs_react_summary("Alkanes") -> res
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+
+### Carbonyl compounds
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_sbs_react_summary("Carbonyl compounds") -> res
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+
+### Benzoyl derivatives
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_sbs_react_summary("Benzoyl derivatives") -> res
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+
+### Other
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+metab_subclass_react_count$metab_subclass[12] -> metab_subclass;metab_subclass
+metab_cpds[subclass %in% metab_subclass]
+
+metab_sbs_react_summary(metab_subclass) -> res
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+
+### Focus on abundant metabolites
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+################################################################################
+metab_cpds[name == "Betaine"] ->cpd;cpd
+metab_sbs_react_summary_byid(cpd$id) -> res
+
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+
+################################################################################
+metab_cpds[name == "L-Cysteate"] ->cpd;cpd 
+metab_sbs_react_summary_byid(cpd$id) -> res 
+
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+
+################################################################################
+metab_cpds[name == "Ectoine"] ->cpd;cpd
+metab_sbs_react_summary_byid(cpd$id) -> res
+
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+
+################################################################################
+metab_cpds[name == "Gynesine"] ->cpd;cpd # Trigonelline
+metab_sbs_react_summary_byid(cpd$id) -> res
+
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+
+################################################################################
+metab_cpds[name == "Citrulline"] ->cpd;cpd 
+metab_sbs_react_summary_byid(cpd$id) -> res
+
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+################################################################################
+metab_cpds[name_orig == "eicosane"] ->cpd;cpd
+metab_sbs_react_summary_byid(cpd$id) -> res 
+
+res$unique_react_count # nohit
+res$react_count_by_metab 
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+
+################################################################################
+metab_cpds[name == "p-Cresol"] ->cpd;cpd 
+metab_sbs_react_summary_byid(cpd$id) -> res
+
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+################################################################################
+metab_cpds[name == "indol"] ->cpd;cpd 
+metab_sbs_react_summary_byid(cpd$id) -> res # nohit
+
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+
+################################################################################
+
+metab_cpds[name == "Methyl sulfide"] ->cpd;cpd 
+metab_sbs_react_summary_byid(cpd$id) -> res # nohit
+
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+
+################################################################################
+
+metab_cpds[name == "Methyl sulfide"] ->cpd;cpd 
+metab_sbs_react_summary_byid(cpd$id) -> res # nohit
+
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+
+################################################################################
+
+metab_cpds[name == "Methyl sulfide"] ->cpd;cpd 
+metab_sbs_react_summary_byid(cpd$id) -> res # nohit
+
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+### Focus on significant metabolites
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+################################################################################
+metab_cpds[name == "L-2-Aminoadipate"] ->cpd;cpd 
+metab_sbs_react_summary_byid(cpd$id) -> res 
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+
+################################################################################
+metab_cpds[name == "(E)-Cinnamate"] ->cpd;cpd 
+metab_sbs_react_summary_byid(cpd$id) -> res 
+
+res$unique_react_count
+res$react_count_by_metab
+res$react_count_by_sbs_subcat
+res$all_sbs_summary 
+res$react_summary 
+res$all_sbs_summary[n_gems>15 & avg_compl>50] 
+```
+
+#----
+# INTEGRATION WITH VIR
+## Import vocabularies 
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+vfdb_vocabulary<-fread("~/rstudio-server/storage16TB/riccardo/tools/phold/vfdb_description_output.csv")
+defencefinder_vocabulary<-fread("~/rstudio-server/storage16TB/riccardo/tools/phold/defensefinder_plddt_over_70_metadata.tsv")
+card_vocabulary<-fread("~/rstudio-server/storage16TB/riccardo/tools/phold/card_plddt_over_70_metadata.tsv")
+```
+
+## Import and tidy data
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+vir_analysis<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_analysis_03jan25.csv")
+mag_analysis<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_analsis_fba_sbs_16nov24.csv")
+phold_annot<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/pharokka_phold/phold/phold_per_cds_predictions.tsv") %>%
+  filter(contig_id %in% vir_analysis$votu)
+names(phold_annot)[1]="votu"
+
+phold_annot %>%
+  dplyr::rename(func=`function`) -> phold_annot1
+
+phold_annot1 %>%
+  mutate(func= 
+           case_when(
+             func %in% c("head and packaging", "tail", "connector") ~ "Structural components",
+             func == "moron, auxiliary metabolic gene and host takeover" ~ "Auxiliary genes and host takeover",
+             func == "other" ~ "Other", .default = func)) -> phold_annot2
+
+
+phold_annot2 %>% dplyr::select(cds_id, func, product) -> phold_annot_simple
+
+blastp_out<-list.files(
+  "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/blastp_mags_phold_morons_07jan25/",
+  pattern = ".faa", full.names = T)
+
+foreach(i = blastp_out[])%do%{
+fread(i) %>%
+    add_column(OTU=str_extract(i, "[:alpha:]+_SemiBin_[:digit:]+")) -> hits
+  names(hits) = c("qseqid", "sseqid", "pident", "length", "mismatch", "gapopen", 
+             "qstart", "qend", "sstart", "send", "evalue", "bitscore", 
+             "qlen", "slen", "OTU")
+  hits
+  } %>% rbindlist -> blastp
+
+columns <- c("qseqid", "sseqid", "pident", "length", "mismatch", "gapopen", 
+             "qstart", "qend", "sstart", "send", "evalue", "bitscore", 
+             "qlen", "slen")
+react_sbs_metab_info<-fread(
+   "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/gem_reactions_17mar25.csv")
+```
+
+## BLAST: Morons and other vs MAGs proteins
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Check that all the MAGs have been processed
+length(unique(blastp$OTU))
+
+blastp %>%
+  mutate(qseqid_gene = str_split(qseqid, "\\:", simplify = T)[,2]) %>%
+  mutate(
+  qperc_align=(length/qlen)*100,
+  sperc_align=(length/slen)*100,
+  )-> blastp1
+
+
+phold_annot$`function` %>% table
+unique(blastp1$qseqid) %>% length
+unique(blastp1$sseqid) %>% length
+mag_analysis$Total_Coding_Sequences %>% mean
+
+blastp1 %>%
+  dplyr::select(sseqid, OTU)%>%
+  unique %>%
+  group_by(OTU) %>% count()
+
+# Select mag_analysis MAGs only
+blastp1 %>%
+  filter(OTU %in% mag_analysis$OTU) -> blastp2
+
+blastp2 %>% 
+  filter(pident>=75,
+         qperc_align>=95,
+         evalue<1e-10
+         )-> blastp_f
+
+blastp2 %>% 
+  filter(pident>=90,
+         qperc_align>=50,
+         #evalue<1e-10
+         )-> blastp_f
+
+blastp_f %>%
+  dplyr::select(OTU, qseqid, qseqid_gene, qperc_align, sperc_align, evalue, length) %>%
+  mutate(qseqid = str_split(qseqid, ":", simplify = T)[,1]) %>%
+  dplyr::rename(cds_id = qseqid_gene, votu=qseqid) %>%
+  left_join(phold_annot_simple, by = "cds_id") -> blast_phold
+
+blast_phold %>% count(product, sort = T)
+
+mag_analysis[OTU %in% blast_phold$OTU]
+vir_analysis[votu %in% blast_phold$qseqid] 
+```
+
+#
+## Moron and auxiliary, and others
+### Prepare
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval = FALSE}
+# Select and summarise OTHER annot
+
+phold_annot2 %>% 
+  filter(func == "Auxiliary genes and host takeover") -> aux
+
+aux %>%
+  count(product) %>% 
+  arrange(desc(n)) -> aux_count
+names(aux_count) = c("Gene", "Count")
+aux_count %<>% add_column(Category = "AUX", .before = "Gene")
+
+
+# Expand VFDB annotations
+aux %>% 
+  dplyr::select(votu, cds_id, product, tophit_protein) %>%
+  filter(product == "VFDB virulence factor protein") %>%
+  dplyr::rename(prot_id=tophit_protein) %>% merge(vfdb_vocabulary, by="prot_id") -> aux_vfdb
+
+aux_vfdb %>% 
+  group_by(description) %>% 
+  count(sort = T) -> aux_vfdb_count
+names(aux_vfdb_count) = c("Gene", "Count")
+aux_vfdb_count %<>% add_column(Category = "VFDB", .before = "Gene")
+
+
+# Expand DefenceFinder annotations
+aux %>% 
+  dplyr::select(votu, cds_id, product, tophit_protein) %>%
+  filter(product == "DefenseFinder protein") %>%
+  mutate(id = parse_number(str_extract(tophit_protein, "_[:digit:]+$"))) %>% 
+  merge(defencefinder_vocabulary, by="id") -> aux_defencefinder
+
+
+aux_defencefinder %>% 
+  group_by(gene_name) %>% 
+  count(sort = T) -> aux_defencefinder_count
+names(aux_defencefinder_count) = c("Gene", "Count")
+aux_defencefinder_count %<>% add_column(Category = "DF", .before = "Gene")
+
+# Expand CARD annotations
+aux %>% 
+  dplyr::select(votu, cds_id, product, tophit_protein) %>%
+  filter(product == "CARD resistance protein") %>% 
+  rename("Protein Accession" = tophit_protein) %>%
+  merge(card_vocabulary, by="Protein Accession") -> aux_card
+
+
+# Select and summarise OTHER annot
+phold_annot2 %>% 
+  filter(func == "Other") -> oth
+
+oth %>%
+  count(product) %>% 
+  arrange(desc(n)) -> oth_count
+names(oth_count) = c("Gene", "Count")
+oth_count %<>% add_column(Category = "OTH", .before = "Gene")
+
+
+rbindlist(list(aux_count, aux_defencefinder_count, aux_vfdb_count, oth_count)) %>%
+  arrange(desc(Count)) -> aux_oth_gene_count 
+ 
+ fwrite(
+    aux_oth_gene_count,
+    file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/vir_aux_other_counts_11mar25.csv")
+```
+
+### Analyse blast output
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+nrow(blast_phold)
+unique(blast_phold$OTU) %>% length
+unique(blast_phold$qseqid) %>% length
+unique(blast_phold$product) %>% length
+
+# Number of found genes by MAG
+blast_phold %>%
+  group_by(OTU, product) %>%
+  count(sort = T) -> blast_phold_mag_product_count
+
+# Number of found genes by vOTU
+blast_phold %>%
+  group_by(votu, product) %>%
+  count(sort = T) -> blast_phold_votu_product_count
+
+# Number of found genes by gene
+blast_phold %>%
+  count(product, sort = T) %>%
+  mutate(prop=100*(n/sum(n)))
+
+# Number of found genes by MAG and vOTU
+blast_phold %>%
+  group_by(OTU, votu) %>%
+  count(product, sort = T) -> blast_phold_votu_mag_count
+
+# Check gene content of matched vOTUs
+phold_annot2[votu %in% unique(blast_phold$votu)] 
+
+# Check taxonomy of matched MAGs and vOTUs
+mag_analysis[OTU %in% blast_phold$OTU]
+vir_analysis[votu %in% blast_phold$votu] 
+
+# Check VFDB annotations
+aux_vfdb[cds_id %in% blast_phold$cds_id] %>% count(description, sort =  T)
+
+# Check CARD annotations
+aux_card[cds_id %in% blast_phold$cds_id]
+
+```
+
+### Supp. file 9 - blast out
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+merge(
+  merge(
+    blast_phold,
+    mag_analysis[, c("OTU", "Class")], by = "OTU"),
+    vir_analysis[, c("votu", "Class")], by = "votu"
+) -> blast_phold2
+
+names(blast_phold2)
+blast_phold2%>% 
+  relocate(c(Class.y), .after = OTU) %>%
+  relocate(c(Class.x), .after = Class.y) %>%
+  relocate(c(func, product), .after = cds_id) %>%
+  mutate(Class.x = str_remove_all(Class.x, "c__")) %>%
+  rename("vOTU ID" = votu,
+         "MAG ID" = OTU,
+         "vOTU phylo Class" = Class.y,
+         "MAG phylo Class" = Class.x,
+         "Virus gene category" = func,
+         "Virus gene function" = product,
+         "vOTU_CDS_ID (Query)" = cds_id,
+         "Query alignment (%)" = qperc_align,
+         "Subject alignment (%)" = sperc_align,
+         "Alignment length" = length
+         )-> blast_phold_nice
+
+fwrite(blast_phold_nice, 
+       file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/votu_mags_aux_oth_blastp_14mar25.tsv", sep = "\t", dec = ",")
+
+```
+
+### Analyse by gene keywords
+Putative AMGs searched by keywords among GEMs reactions
+Sorted by number of hits
+###FUN: create AMG-GEM_react dataset
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+AMG_GEM_manual_report <- function (gene,dat){
+  
+  list(
+  hits=add_column(dat, "Viral gene" = gene,
+                   .before = "react_id2") %>% 
+                    arrange(desc(n_gems)),
+  sbs_id_count = unlist(strsplit(str_remove(dat$subsytems_ids, ";-"), ";")) %>% table %>% sort,
+  sbs_count = unlist(strsplit(str_remove(dat$subystems, ";-"), ";")) %>% table %>% sort
+  )
+}
+
+AMG_GEM_auto_report<-function(gene=amg$product){
+  gene %>% str_extract_all("[:alpha:]{3,}") %>% unlist -> keyw # decompose into plain-language keywords
+  if(length(keyw) > 2){
+    
+    foreach(n= 2:length(keyw))%do%{
+      combn(keyw,m = n) -> comb_mat
+      if(!is.null(nrow(comb_mat))){split(comb_mat, col(comb_mat))}else{list(comb_mat)}
+      } %>% flatten -> comb_list
+  }else{
+  list(keyw)-> comb_list}  #calculate pair combinations
+  
+  foreach(vec = comb_list)%do%{ #calculate permutations and initiate loop
+    rbind(
+      react_sbs_metab_info[
+        Reduce(`&`, lapply(vec, function(w) grepl(w, react_name, ignore.case = TRUE))) # look for the combine presence of keywords
+        ] %>% 
+        add_column(
+          keywords_n=length(keyw),
+          keywords=paste0(vec, collapse = ";"), # declare which keywords were searched
+          Operator="AND", .after = "react_id2"),
+      react_sbs_metab_info[
+        grepl(paste(vec, collapse = "|"), react_name, ignore.case = TRUE) # look for any keywords
+        ] %>% 
+        add_column(
+          keywords_n=length(keyw),
+          keywords=paste0(vec, collapse = ";"),
+          Operator="OR", .after = "react_id2")
+    )
+  } %>% rbindlist %>% 
+    add_column(Vgene=gene, .after = "react_id2") %>% # declare which viral gene was searched
+    unique %>%
+    rowwise %>%
+    mutate(keywords_hits = length(unlist(strsplit(keywords,";"))),
+           prop_keywords = round(keywords_hits/keywords_n,2), .after = "react_id2"
+           )
+}
+```
+
+### Analyse by viral gene
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+aux_oth_gene_count
+#### AUX #####
+# Autosearch
+foreach(i = aux_oth_gene_count[Count>6, Gene])%do%{
+  AMG_GEM_auto_report(gene = i) -> res #%>% filter(Operator == "AND")->res
+  if(nrow(res)==0){add_row(res)->res;res$Vgene=i}
+  res
+  } %>% rbindlist -> amgs_react
+
+amgs_react %>% 
+  filter(is.na(react_id2) | prop_keywords>0.25) -> amgs_react_f
+
+################## Search by  viral gene #######################################
+gene = "Galactose-3-O-sulfotransferase"
+phold_annot[votu %in% aux[product == gene,votu]] %>% 
+  group_by(votu, product) %>% count 
+amgs_react_f[Vgene == gene] -> hit
+unique(hit$react_id2) %>% length
+AMG_GEM_manual_report(gene = gene, dat = hit[prop_gems > 0]) -> rep
+rep$sbs_count
+rep$sbs_id_count
+sbs_info_fva_f[ID %in% names(rep$sbs_id_count)]
+
+####
+gene = "galactosyl transferase"
+amgs_react_f[Vgene == gene & Operator == "AND"] -> hit
+unique(hit$react_id2) %>% length
+hit$n_gems %>% median
+hit$f1_prop%>% median
+AMG_GEM_manual_report(gene = gene, dat = hit[prop_gems > 0]) -> rep
+rep$sbs_count
+hit$fmax_median %>% mean(na.rm = T)
+hit$fmin_median %>% mean(na.rm = T)
+sbs_info_fva_f[ID %in% names(rep$sbs_id_count)]
+s
+
+####
+gene = "phosphoadenosine phosphosulfate reductase"
+phold_annot[votu %in% aux[product == gene,votu]] %>% 
+  group_by(votu, product) %>% count 
+amgs_react_f[Vgene == gene & Operator == "AND" & prop_keywords > 0.75] -> hit
+unique(hit$react_id2) %>% length
+hit$n_gems %>% median
+hit$f1_prop%>% median
+AMG_GEM_manual_report(gene = gene, dat = hit[prop_gems > 0]) -> rep
+rep$sbs_count
+sbs_info_fva_f[ID %in% names(rep$sbs_id_count)]
+mag_analysis[OTU %in% sbs_fva_ox_categories_f2[react_id2 == "rxn05239", OTU]]
+
+####
+gene = "porphyrin biosynthesis"
+amgs_react_f[Vgene == gene ] -> hit
+unique(hit$react_id2) %>% length
+hit$n_gems %>% median
+hit$f1_prop%>% median
+AMG_GEM_manual_report(gene = gene, dat = hit[prop_gems > 0]) -> rep
+rep$sbs_count
+rep$sbs_id_count
+unique(hit$prop_gems) %>% mean
+hit$fmax_median %>% mean(na.rm = T)
+hit$fmin_median %>% mean(na.rm = T)
+hit$f1_prop
+sbs_info_fva_f[ID %in% names(rep$sbs_id_count)]
+
+####
+gene = "aerobic cobaltochelatase CobT subunit"
+amgs_react_f[Vgene == gene & prop_keywords>0.7] -> hit
+unique(hit$react_id2) %>% length
+hit$n_gems %>% median
+hit$f1_prop%>% median
+AMG_GEM_manual_report(gene = gene, dat = hit[prop_gems > 0]) -> rep
+rep$sbs_count
+rep$sbs_id_count
+unique(hit$prop_gems) %>% mean
+hit$fmax_median %>% mean(na.rm = T)
+hit$fmin_median %>% mean(na.rm = T)
+hit$f1_prop
+sbs_info_fva_f[ID %in% names(rep$sbs_id_count)]
+
+####
+react_sbs_metab_info[grepl("oxoglutarate", react_name) &
+                     grepl("oxidoreductase", react_name)
+                       ] -> hit
+unique(hit$react_id2) %>% length
+hit$n_gems %>% median
+hit$f1_prop%>% median
+
+AMG_GEM_manual_report(gene = "2OG-Fe(II) oxygenase", dat = hit[prop_gems > 0]) -> rep
+rep$sbs_count
+rep$sbs_id_count
+sbs_info_fva_f[ID %in% names(rep$sbs_id_count)]
+
+
+
+####
+react_sbs_metab_info[grepl("cob", react_name)
+                       ] -> hit
+react_sbs_metab_info[grepl("coby", react_name) |
+                     grepl("cob\\(", react_name) |
+                     grepl("cobi", react_name) |
+                     grepl("cobaltoche", react_name, ignore.case = T) 
+                       ] -> hit
+unique(hit$react_id2) %>% length
+hit$n_gems %>% median
+hit$f1_prop%>% median
+fva_res[react_id2 %in% hit$react_id2, min.flux] %>% mean
+fva_res[react_id2 %in% hit$react_id2, max.flux] %>% mean
+
+####
+gene = "cysteine dioxygenase"
+amgs_react_f[Vgene == gene] -> hit
+unique(hit$react_id2) %>% length
+AMG_GEM_manual_report(gene = gene, dat = hit[prop_gems > 0]) -> rep
+rep$sbs_count
+rep$sbs_id_count
+sbs_info_fva_f[ID %in% names(rep$sbs_id_count)]
+
+####
+gene = "ferredoxin"
+amgs_react_f[Vgene == gene & Operator == "AND"] -> hit
+unique(hit$react_id2) %>% length
+hit$n_gems %>% median
+hit$f1_prop%>% median
+
+AMG_GEM_manual_report(gene = gene, dat = hit[prop_gems > 50]) -> rep
+rep$hits 
+rep$sbs_count
+hit$fmax_median %>% mean(na.rm = T)
+hit$fmin_median %>% mean(na.rm = T)
+unique(hit$prop_gems) %>% mean
+sbs_info_fva_f[ID %in% names(rep$sbs_id_count)]
+
+####
+gene = "gamma-glutamyl cyclotransferase"
+amgs_react_f[Vgene == gene & Operator == "AND"] -> hit
+unique(hit$react_id2) %>% length
+hit$n_gems %>% median
+hit$f1_prop%>% median
+unique(hit$fmax_median) %>% mean(na.rm = T)
+unique(hit$fmin_median) %>% mean(na.rm = T)
+AMG_GEM_manual_report(gene = gene, dat = hit[prop_gems > 50]) -> rep
+rep$sbs_count
+rep$sbs_id_count
+sbs_info_fva_f[ID %in% names(rep$sbs_id_count)] 
+
+####
+gene = "L-glutamine-D-fructose-6-phosphate aminotransferase"
+amgs_react_f[Vgene == gene & Operator == "AND" ] -> hit
+react_sbs_metab_info[react_name == "L-glutamine:D-fructose-6-phosphate isomerase (deaminating)" ] -> hit
+unique(hit$react_id2) %>% length
+hit$n_gems %>% median
+hit$f1_prop%>% median
+unique(hit$fmax_median) %>% mean
+unique(hit$fmin_median) %>% mean
+
+AMG_GEM_manual_report(gene = gene, dat = hit[prop_gems > 50]) -> rep
+rep$sbs_count
+rep$sbs_id_count
+sbs_info_fva_f[ID %in% names(rep$sbs_id_count)]
+
+####
+gene = "enoyl-CoA hydratase/carnithine racemase-like"
+amgs_react_f[Vgene == gene & Operator == "AND" & prop_keywords > 0.33] -> hit
+unique(hit$react_id2) %>% length
+hit$n_gems %>% median
+hit$f1_prop%>% median
+unique(hit$fmax_median) %>% mean(na.rm = T)
+unique(hit$fmin_median) %>% mean(na.rm = T)
+
+AMG_GEM_manual_report(gene = gene, dat = hit[prop_gems > 50]) -> rep
+rep$sbs_count
+rep$sbs_id_count
+sbs_info_fva_f[ID %in% names(rep$sbs_id_count)]
+
+####
+gene = "phosphofructokinase"
+amgs_react_f[Vgene == gene] -> hit
+react_sbs_metab_info[grepl("D-fructose-6-phosphate 1-phosphotransferase", react_name)] -> hit
+unique(hit$react_id2) %>% length
+hit$n_gems %>% median
+hit$f1_prop%>% median
+unique(hit$fmax_median) %>% mean
+unique(hit$fmin_median) %>% mean
+
+AMG_GEM_manual_report(gene = gene, dat = hit[prop_gems > 50]) -> rep
+rep$sbs_count
+rep$sbs_id_count
+sbs_info_fva_f[ID %in% names(rep$sbs_id_count)]
+
+####
+gene = "acyl-CoA N-acyltransferase"
+amgs_react_f[Vgene == gene & Operator == "AND" & prop_keywords > 0.75] -> hit
+react_sbs_metab_info[grepl("N-acyltransferase", react_name)] -> hit
+unique(hit$react_id2) %>% length
+hit$n_gems %>% median
+hit$f1_prop%>% median
+unique(hit$fmax_median) %>% mean(na.rm = T)
+unique(hit$fmin_median) %>% mean(na.rm = T)
+
+AMG_GEM_manual_report(gene = gene, dat = hit[prop_gems > 50]) -> rep
+rep$sbs_count
+rep$sbs_id_count
+sbs_info_fva_f[ID %in% names(rep$sbs_id_count)]
+
+####
+gene = "phosphoheptose isomerase"
+amgs_react_f[Vgene == gene] -> hit
+react_sbs_metab_info[grepl("heptose", react_name)] -> hit
+
+unique(hit$react_id2) %>% length
+AMG_GEM_manual_report(gene = gene, dat = hit[prop_gems > 0]) -> rep
+rep$sbs_count
+rep$sbs_id_count
+sbs_info_fva_f[ID %in% names(rep$sbs_id_count)]
+
+```
+
+### Supp.file 9 - s2 - Taxonomy and hosts of vOTUs with AUX and OTH genes
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+iphop_mags<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/iphop_mags_vOTUs/Host_prediction_to_genome_m90.csv") %>% rename(votu=Virus)
+
+phold_annot2[func %in% c("Auxiliary genes and host takeover", "Other")] %>% 
+  select(votu, product)-> aux_oth_votu_genes
+
+aux_oth_votu_genes %>%  group_by(votu) %>% summarise(product = paste0(product, collapse = ";")) -> aux_oth_votu_genes_2
+iphop_mags %>%  
+  group_by(votu) %>% summarise(
+    `Host genome` = paste0(`Host genome`, collapse = " ||"),
+    `Host taxonomy` = paste0(`Host taxonomy`, collapse = " ||")) -> iphop_mags_2
+
+merge(
+  aux_oth_votu_genes_2,
+  vir_analysis[,.(votu, Class)], by = "votu") %>%
+  left_join(iphop_mags_2, by="votu") %>% data.table -> aux_iphop
+
+aux_iphop %>%
+  rename("vOTU ID" = votu,
+         "AUX and OTH genes" = product
+         ) %>%
+  fwrite( 
+       file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/votu_hosts_aux_oth_26mar25.tsv", sep = "\t", dec = ",")
+
+```
+
+### Check associations between AUX+OTH genes
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+
+aux_iphop[grepl("porph", product) & grepl("cobal", product)] %>% view
+aux_iphop[grepl("porph", product)] %>% view
+
+aux_iphop[grepl("porph", product)] %>% pull(product) %>%
+  strsplit(";") %>% unlist %>% table %>% sort
+
+aux_iphop[grepl("galactosyl transferase", product)] %>% pull(product) %>%
+  strsplit(";") %>% unlist %>% table %>% sort
+
+aux_iphop[grepl("Galactose-3-O-sulfotransferase", product)] %>% pull(product) %>%
+  strsplit(";") %>% unlist %>% table %>% sort
+
+aux_iphop[grepl("gamma-glutamyl cyclotransferase", product)] %>% pull(product) %>%
+  strsplit(";") %>% unlist %>% table %>% sort
+
+aux_iphop[grepl("2OG-", product)] %>% pull(product) %>%
+  strsplit(";") %>% unlist %>% table %>% sort
+
+aux_iphop[grepl("L-glutamine-D-fructose-6-phosphate aminotransferase", product)] %>% pull(product) %>%
+  strsplit(";") %>% unlist %>% table %>% sort
+
+aux_iphop[grepl("cysteine dioxygenase", product)] %>% pull(product) %>%
+  strsplit(";") %>% unlist %>% table %>% sort
+
+```
+
+### VIR tax and AUX
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+left_join(
+  vir_analysis[, .(votu, Class, size_kb, mean_vir_abund_Con, mean_vir_abund_Nat, condition_higher_abund, mean_vir_all)],
+  phold_annot2[product != "hypothetical protein" & product %in% aux_oth_gene_count$Gene, .(votu, product)] %>% group_by(votu) %>%
+    summarise(aux_genes=paste0(product, collapse = ";"))
+) -> vir_analysis_aux
+
+fwrite(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_analysis_aux_7apr25.csv", x = vir_analysis_aux)
+
+left_join(
+  vir_analysis[, .(votu, Class, size_kb, mean_vir_abund_Con, mean_vir_abund_Nat, mean_vir_all, condition_higher_abund)],
+  phold_annot2[product != "hypothetical protein" & product %in% aux_oth_gene_count$Gene, .(votu, product)] 
+)-> aux_abund
+
+aux_abund %>% 
+  group_by(product) %>%
+  summarise(
+    mean_con=mean(mean_vir_abund_Con),
+    mean_nat=mean(mean_vir_abund_Nat)
+            ) %>% mutate(diff=mean_con-mean_nat,
+                         mean = (mean_con+mean_nat)/2
+                         )
+
+"Galactose-3-O-sulfotransferase|phosphoadenosine phosphosulfate reductase|galactosyl transferase|2OG\\-Fe\\(II\\) oxygenase|porphyrin biosynthesis|methylamine utilization|cysteine dioxygenase|phosphoheptose isomerase|ferredoxin|gamma-glutamyl cyclotransferase|L-glutamine-D-fructose-6-phosphate aminotransferase|enoyl-CoA hydratase\\/carnithine racemase-like|cobalamin biosynthesis protein|phosphofructokinase" -> aux_oth_string
+
+
+vir_analysis_aux[,mean_vir_all] %>% sum
+# Count the relative abundance of vOTUs with proteins (range and cumulative)
+vir_analysis_aux[grepl("Galactose-3-O-sulfotransferase", aux_genes),mean_vir_all] %>%
+  range() %>% round(2) %>% paste0(collapse = "-")
+vir_analysis_aux[grepl("Galactose-3-O-sulfotransferase", aux_genes),mean_vir_all] %>% sum
+
+vir_analysis_aux[grepl("phosphoadenosine phosphosulfate reductase", aux_genes),mean_vir_all]%>%
+  range() %>% round(2) %>% paste0(collapse = "-")
+vir_analysis_aux[grepl("phosphoadenosine phosphosulfate reductase", aux_genes),mean_vir_all]%>% sum
+
+vir_analysis_aux[grepl("galactosyl transferase", aux_genes),mean_vir_all] %>% 
+  range() %>% round(2) %>% paste0(collapse = "-")
+vir_analysis_aux[grepl("galactosyl transferase", aux_genes),mean_vir_all]%>% sum
+
+vir_analysis_aux[grepl("porphyrin biosynthesis", aux_genes),mean_vir_all] %>%
+  range() %>% round(2) %>% paste0(collapse = "-")
+vir_analysis_aux[grepl("porphyrin biosynthesis", aux_genes),mean_vir_all]%>% sum
+
+
+vir_analysis_aux[grepl("2OG\\-Fe\\(II\\) oxygenase", aux_genes),mean_vir_all] %>%
+  range() %>% round(2) %>% paste0(collapse = "-")
+vir_analysis_aux[grepl("2OG\\-Fe\\(II\\) oxygenase", aux_genes),mean_vir_all] %>% sum
+
+vir_analysis_aux[grepl("cysteine dioxygenase", aux_genes),mean_vir_all] %>%
+  range() %>% round(2) %>% paste0(collapse = "-")
+vir_analysis_aux[grepl("cysteine dioxygenase", aux_genes),mean_vir_all]%>% sum
+
+vir_analysis_aux[grepl("ferredoxin", aux_genes),mean_vir_all] %>%
+  range() %>% round(2) %>% paste0(collapse = "-")
+vir_analysis_aux[grepl("ferredoxin", aux_genes),mean_vir_all] %>% sum
+
+vir_analysis_aux[grepl("L-glutamine-D-fructose-6-phosphate aminotransferase", aux_genes),mean_vir_all] %>%
+  range() %>% round(2) %>% paste0(collapse = "-")
+vir_analysis_aux[grepl("L-glutamine-D-fructose-6-phosphate aminotransferase", aux_genes),mean_vir_all] %>% sum
+
+vir_analysis_aux[grepl("gamma-glutamyl cyclotransferase", aux_genes),mean_vir_all] %>%
+  range() %>% round(2) %>% paste0(collapse = "-")
+vir_analysis_aux[grepl("gamma-glutamyl cyclotransferase", aux_genes),mean_vir_all] %>% sum
+
+vir_analysis_aux[grepl("enoyl-CoA hydratase\\/carnithine racemase-like", aux_genes),mean_vir_all] %>%
+  range() %>% round(2) %>% paste0(collapse = "-")
+vir_analysis_aux[grepl("enoyl-CoA hydratase\\/carnithine racemase-like", aux_genes),mean_vir_all]%>% sum
+
+vir_analysis_aux[grepl("cobalamin biosynthesis protein", aux_genes),mean_vir_all] %>%
+  range() %>% round(2) %>% paste0(collapse = "-")
+vir_analysis_aux[grepl("cobalamin biosynthesis protein", aux_genes),mean_vir_all] %>% sum
+
+vir_analysis_aux[grepl("phosphofructokinase", aux_genes),mean_vir_all] %>%
+  range() %>% round(2) %>% paste0(collapse = "-")
+vir_analysis_aux[grepl("phosphofructokinase", aux_genes),mean_vir_all] %>% sum
+
+vir_analysis_aux[grepl("acyl-CoA N-acyltransferase", aux_genes),mean_vir_all] %>%
+  range() %>% round(2) %>% paste0(collapse = "-")
+vir_analysis_aux[grepl("acyl-CoA N-acyltransferase", aux_genes),mean_vir_all]%>% sum
+
+```
+### vOTUs rank abundance curve
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+
+fread(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_analysis_aux_7apr25.csv")-> vir_analysis_aux
+
+vir_analysis_aux %>%
+  mutate(selected_aux = str_extract(aux_genes, aux_oth_string)) -> vir_analysis_aux1
+
+aux_colors<-hcl.colors(n=14, palette = 'Zissou 1')
+names(aux_colors)=unique(vir_analysis_aux1$selected_aux)[
+  c(3,4,5,6,7,2,9,10, 11,12,13,14,15,8)
+]
+
+
+vir_analysis_aux1 %>%
+  ggplot(
+    aes(x=reorder(votu, mean_vir_all, decreasing = T),
+        y=mean_vir_abund_Con
+        )) +
+  geom_point(aes(fill = selected_aux),
+             shape=21, size=3, color=alpha('black', 0.1)) +
+  geom_line(
+    aes(y=mean_vir_all,
+        group=1), color = "black") +
+  theme_cowplot() +
+  scale_fill_manual(
+    values=aux_colors,
+    na.value = alpha("white", 0.1)) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "none"
+        ) -> rank_abundance_con
+
+vir_analysis_aux1 %>%
+  ggplot(
+    aes(x=reorder(votu, mean_vir_all, decreasing = T),
+        y=mean_vir_abund_Nat
+        )) +
+  geom_point(aes(fill = selected_aux),
+             shape=21, size=3, color=alpha('black', 0.1)) +
+  geom_line(
+    aes(y=mean_vir_all,
+        group=1), color = "black") +
+  theme_cowplot() +
+  scale_fill_manual(
+    values=aux_colors,
+    na.value = alpha("white", 0.1)) +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "none"
+        ) -> rank_abundance_nat
+
+require(patchwork)
+rank_abundance_con + rank_abundance_nat
+
+vir_analysis_aux1 %>%
+  mutate(quartile=ntile(n = 4, mean_vir_all)
+         ) %>%
+  filter(!is.na(selected_aux)) %>%
+  group_by(quartile, selected_aux) %>%
+  count %>%
+  ggplot(aes(y=n, x = quartile)) +
+  geom_point()
+
+vir_analysis_aux1 %>%
+  filter(!is.na(selected_aux)) %>%
+  ggplot(aes(x=mean_vir_all,
+             y = selected_aux,
+             fill = condition_higher_abund )) +
+  geom_jitter(height = 0.1, shape = 21, size = 3) +
+  theme_cowplot() +
+  scale_fill_manual(values = saltmarsh_colors)
+```
+#----
+# OTHER
+## Datasets description 3
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+###### IMPORTANT OBJECTS ########
+# all subsystems considered with full hierarchy
+# for each gem
+subs_annot3
+
+# long form matrix with the association between subsytems and reaction
+# for each gem
+sbs_react2
+
+# addition to sbs_react2 with all the FVA values foreach reactions
+# and subsytem hierarchy
+# for each gem
+sbs_fva_ox_categories_f
+
+# sbs by category and sub-category,
+# distribution across GEMs, expected number of reactions
+# min, max, median number of reaction and total across all GEMS
+# median number of active and inactive reactions
+sbs_info_fva_f
+
+# Reaction + metabolites description
+react_sbs_metab_info
+#################################
+```
+### VIR genes in RES and NAT
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+merge(
+  phold_annot2 %>% select(votu, func, product),
+  vir_analysis %>% select(votu, condition_higher_abund),
+by="votu") -> votu_aux_diff
+
+votu_aux_diff[grepl(aux_oth_string, product)] %>%
+  group_by(product, condition_higher_abund) %>%
+  count %>%
+  ggplot(aes(x=n, y = product, color = condition_higher_abund)) +
+  geom_bar(stat="identity")
+
+vir_analysis %>% count(condition_higher_abund) -> vir_expected_freq
+vir_expected_freq1<-vir_expected_freq$n/sum(vir_expected_freq$n)
+names(vir_expected_freq1)=vir_expected_freq$condition_higher_abund
+
+votu_aux_diff %>%
+  group_by(func, product, condition_higher_abund) %>%
+  count %>% 
+  pivot_wider(names_from = condition_higher_abund, values_from = n, values_fill = 0) -> vir_aux_freq
+
+# Test significance
+vir_aux_freq %>%
+  rowwise %>%
+  mutate(
+    sum=(Constructed + Natural + ns),
+    con_freq_diff=((Constructed/sum)-vir_expected_freq1[1]) %>% round(2),
+    nat_freq_diff=((Natural/sum)-vir_expected_freq1[2]) %>% round(2),
+    ns_freq_diff=((ns/sum)-vir_expected_freq1[3]) %>% round(2)
+         ) %>%
+  mutate(chisq = 
+           if(Constructed>=5|Natural>=5|ns>=5){
+           chisq.test(c(Constructed, Natural, ns),
+                      p = vir_expected_freq1
+                      )$p.value
+           }else{NA}
+  ) %>% data.table -> flux_sign_prop_chi
+flux_sign_prop_chi[chisq<=0.05 & sum > 10] ->flux_sign_prop_chi_sig_vir
+flux_sign_prop_chi[chisq<=0.05 & sum > 100] ->flux_sign_prop_chi_sig_vir
+
+vir_expected_freq1
+
+```
+### PCA on VIR AUX genes
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+
+vir_analysis %>% as.data.frame %>%
+  filter(votu %in% phold_annot2[grepl(aux_oth_string, product), votu]) -> vir_an_selected
+  
+  
+phold_annot2 %>% as.data.frame %>%
+  filter(votu %in% vir_an_selected$votu & product != "hypothetical protein") %>%
+  select(votu, product) %>% 
+  add_column(pres=1) %>%
+  unique %>%
+  pivot_wider(names_from = product, values_from = pres, values_fill = 0) %>% 
+  column_to_rownames("votu") %>%
+  as.matrix -> vir_gene_mat
+rownames(subs_annot3_mat)
+
+# Calculate PCA
+vir_gene_mat[] %>% prcomp(scale. = F) -> pca
+
+pca$x %>% as.data.frame -> comp
+
+comp[vir_an_selected$votu,"condition_higher_abund"] = vir_an_selected$condition_higher_abund %>%
+  factor(levels = unique(vir_an_selected$condition_higher_abund)[c(2,3,1)],
+         labels = c("Restored", "Natural", "ns")
+         ) %>% as.character
+comp[vir_an_selected$votu,"Class"] = vir_an_selected$Class
+
+ggplot(comp,aes(x=PC1,y=PC2, color=Class)) + 
+  geom_point(size=1) +
+  theme_minimal()
+
+ggplot(comp,aes(x=PC1,y=PC2, color=condition_higher_abund)) + 
+  geom_point(size=1) +
+  theme_minimal()
+
+```
+
+### Subsystems in RES and NAT
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+
+merge(
+  subs_annot3 %>% select(OTU, V5, Name),
+  mag_analysis %>% select(OTU, condition_higher_abund),
+by="OTU") -> gem_sbs_diff
+
+mag_analysis %>% count(condition_higher_abund) -> gem_expected_freq
+gem_expected_freq1<-gem_expected_freq$n/sum(gem_expected_freq$n)
+names(gem_expected_freq1)=gem_expected_freq$condition_higher_abund
+
+
+gem_sbs_diff %>%
+  group_by(V5, Name, condition_higher_abund) %>%
+  count %>% 
+  pivot_wider(names_from = condition_higher_abund, values_from = n, values_fill = 0) -> gem_sbs_freq
+
+# Test significance
+gem_sbs_freq %>%
+  rowwise %>%
+  mutate(
+    sum=(Constructed + Natural + ns),
+    con_freq_diff=((Constructed/sum)-gem_expected_freq1[1]) %>% round(2),
+    nat_freq_diff=((Natural/sum)-gem_expected_freq1[2]) %>% round(2),
+    ns_freq_diff=((ns/sum)-gem_expected_freq1[3]) %>% round(2)
+         ) %>%
+  mutate(chisq = 
+           if(Constructed>=5|Natural>=5|ns>=5){
+           chisq.test(c(Constructed, Natural, ns),
+                      p = gem_expected_freq1
+                      )$p.value
+           }else{NA}
+  ) %>% data.table -> flux_sign_prop_chi
+flux_sign_prop_chi[chisq<=0.05] ->flux_sign_prop_chi_sig_gems
+
+gem_expected_freq1
+vir_expected_freq1
+
+```
+
+### Reactions in RES and NAT
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+merge(
+   fva_res_ox %>% select(OTU, react_id2),
+  mag_analysis %>% select(OTU, condition_higher_abund),
+by="OTU") -> gem_react_diff
+
+mag_analysis %>% count(condition_higher_abund) -> gem_expected_freq
+gem_expected_freq1<-gem_expected_freq$n/sum(gem_expected_freq$n)
+names(gem_expected_freq1)=gem_expected_freq$condition_higher_abund
+
+
+gem_react_diff %>%
+  group_by(react_id2, condition_higher_abund) %>%
+  count %>% 
+  pivot_wider(names_from = condition_higher_abund, values_from = n, values_fill = 0) -> gem_react_freq
+
+# Test significance
+gem_react_freq %>%
+  rowwise %>%
+  mutate(
+    sum=(Constructed + Natural + ns),
+    con_freq_diff=((Constructed/sum)-gem_expected_freq1[1]) %>% round(2),
+    nat_freq_diff=((Natural/sum)-gem_expected_freq1[2]) %>% round(2),
+    ns_freq_diff=((ns/sum)-gem_expected_freq1[3]) %>% round(2)
+         ) %>%
+  mutate(chisq = 
+           if(Constructed>=5|Natural>=5|ns>=5){
+           chisq.test(c(Constructed, Natural, ns),
+                      p = gem_expected_freq1
+                      )$p.value
+           }else{NA}
+  ) %>% data.table -> flux_sign_prop_chi
+flux_sign_prop_chi[chisq<=0.05] ->flux_sign_prop_chi_sig_gems_react
+flux_sign_prop_chi_sig_gems_react %>% 
+  merge(reaction_db_simple %>% 
+          select(react_id2, react_name)) %>%
+  filter(sum>50)->flux_sign_prop_chi_sig_gems_react1
+
+gem_expected_freq1
+vir_expected_freq1
+
+```
+
+### Subsystems in RES and NAT
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+merge(
+   subs_annot3 %>% select(OTU, Name),
+  mag_analysis %>% select(OTU, condition_higher_abund),
+by="OTU") -> gem_sbs_diff
+
+mag_analysis %>% count(condition_higher_abund) -> gem_expected_freq
+gem_expected_freq1<-gem_expected_freq$n/sum(gem_expected_freq$n)
+names(gem_expected_freq1)=gem_expected_freq$condition_higher_abund
+
+
+gem_sbs_diff %>%
+  group_by(Name, condition_higher_abund) %>%
+  count %>% 
+  pivot_wider(names_from = condition_higher_abund, values_from = n, values_fill = 0) -> gem_sbs_freq
+
+# Test significance
+gem_sbs_freq %>%
+  rowwise %>%
+  mutate(
+    sum=(Constructed + Natural + ns),
+    con_freq_diff=((Constructed/sum)-gem_expected_freq1[1]) %>% round(2),
+    nat_freq_diff=((Natural/sum)-gem_expected_freq1[2]) %>% round(2),
+    ns_freq_diff=((ns/sum)-gem_expected_freq1[3]) %>% round(2)
+         ) %>%
+  mutate(chisq = 
+           if(Constructed>=5|Natural>=5|ns>=5){
+           chisq.test(c(Constructed, Natural, ns),
+                      p = gem_expected_freq1
+                      )$p.value
+           }else{NA}
+  ) %>% data.table -> sbs_prop_chi
+
+sbs_prop_chi[chisq<=0.05] ->sbs_prop_chi_sig
+
+  filter(sum>50)->flux_sign_prop_chi_sig_gems_react1
+
+gem_expected_freq1
+vir_expected_freq1
+
+
+merge(
+   subs_annot3 %>% select(OTU, Name),
+  mag_analysis %>% select(OTU, condition_higher_abund),
+by="OTU") -> gem_sbs_diff
+
+#Import MPSE analysis
+load("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_MPSE_norm_mags99c70c10a99.RData")
+mag_MPSE_norm@assays@data@listData[["RelhellingerBySample"]] -> GEMs_bysample
+
+GEMs_bysample %>% rownames_to_column("OTU") -> GEMs_bysample1
+
+merge(
+   subs_annot3 %>% select(OTU, Name),
+   GEMs_bysample1,
+by="OTU") -> gem_sbs_bysample
+
+
+gem_sbs_bysample %>%
+  pivot_longer(cols = matches("Art|Nat")) %>% data.table-> gem_sbs_bysample_l
+
+gem_sbs_bysample_l %>%
+  #filter(Name == "L-ornithine biosynthesis II") %>%
+  mutate(Group=str_extract(name,"Art|Nat")) -> gem_sbs_bysample_l1
+
+gem_sbs_bysample_l1 %>%
+  group_by(Name) %>% 
+  mutate(shapiro = shapiro.test(value)$p.value) %>%
+  summarise(
+    n_mag=length(unique(OTU)),
+    mean_res=
+    shapiro = unique(shapiro),
+    t_test = broom::tidy(t.test(value ~ Group))$p.value,
+    wilcox_test = broom::tidy(wilcox.test(value ~ Group))$p.value,
+    .groups = 'drop') %>% 
+  mutate(
+    test_pval=
+     case_when(
+     shapiro<0.05 ~ wilcox_test,
+     shapiro>0.05 ~ t_test))->sbs_univariate
+
+sbs_univariate %>% filter(test_pval<0.05) -> sbs_univariate_sig
+
+gem_sbs_bysample_l1[
+  Name %in% sbs_univariate_sig$Name] %>%
+  group_by(Group, Name) %>%
+  summarise(
+    mean=mean(value)
+  ) %>% pivot_wider(names_from = Group, values_from = mean) %>%
+  mutate(diff=Art-Nat)-> sbs_univariate_sig_means
+
+merge(sbs_univariate_sig, sbs_univariate_sig_means) %>% filter(n_mag>50) -> sbs_univariate_sig1
+
+gem_sbs_bysample_l1[Name =="cellulose degradation II (fungi)"] %>%
+  group_by(Name, name, Group) %>%
+  summarise(mean=mean(value)) %>%
+  ggplot(aes(x=Group, y=mean)) + 
+  geom_boxplot()
+```
+
+## General sbs stats sanity check:
+## association 
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+nreact<-nrow(models_reactions) # total n° of reactions
+nsbs<-nrow(subs_annot2);nsbs # total n° of subsystems
+nsbs_f<-nrow(subs_annot3);nsbs_f # total n° of subsystems after filtering
+unique(subs_annot2$ID) %>% length
+unique(subs_annot3$ID) %>% length
+
+#Avg number of reactions by Class
+fva_res_ox %>%
+  count(OTU) %>% merge(select(mag_analysis, c(OTU, Class))) %>%
+  group_by(Class) %>%
+  summarise(
+    count=n(),
+    mean=mean(n),
+    sd=sd(n)) %>% arrange(desc(mean))
+
+#Avg number of subsystems by Class
+subs_annot3 %>%
+  count(OTU) %>% merge(select(mag_analysis, c(OTU, Class))) %>%
+  group_by(Class) %>%
+  summarise(
+    count=n(),
+    mean=mean(n),
+    sd=sd(n)) %>% arrange(desc(mean))
+
+# Sanity check: association with number of CDS
+subs_annot3 %>% group_by(OTU) %>% count %>% 
+  merge(mag_analysis %>% dplyr::select(OTU, Class, Completeness, Genome_Size, Total_Coding_Sequences)) -> sbs_stats
+
+plot(sbs_stats)
+cor.test(sbs_stats$n, sbs_stats$Genome_Size)
+cor.test(sbs_stats$n, sbs_stats$Total_Coding_Sequences)
+```
+# Utils
+## Select votus by name
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval = FALSE}
+votus = unique(blast_phold$qseqid) #blast output
+votus = unique(aux_iphop$votu) #all aux
+
+#Pick the sequences of the viruses
+Biostrings::readDNAStringSet(
+  filepath = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/OTU/all_OTUs_no_doubleBB.fasta",format = "fasta") -> votus_fna
+votus_fna[names(votus_fna) %in% votus] -> selected_votus_fna
+
+dir.create("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/OTU_morons2")
+
+Biostrings::writeXStringSet(
+  selected_votus_fna,
+  filepath = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/OTU_morons2/votus_aux_oth.fa",format = "fasta")
+
+```
+
+## Exctract gene sequences by name
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval = FALSE}
+phold_annot2 %>% count(product) %>% arrange(desc(n)) 
+gene<-"VFDB virulence factor protein"
+phold_annot2 %>% filter(product == gene) %>% 
+  mutate(seq_id=paste0(votu, ":", cds_id))-> phold_selected_gene
+
+#Select vOTUs
+phold_selected_gene %>% pull(seq_id) %>% unique -> seq_ids
+
+# Load auxiliary genes
+Biostrings::readAAStringSet(
+  filepath = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/pharokka_phold/phold/phold_moron_other_aa.fasta",format = "fasta") -> aux.fna
+
+names(aux.fna)
+aux.fna[names(aux.fna) %in% seq_ids] -> selected_votus_fna
+
+selected_votus_fna[1] %>% as.character
+
+```
+
