@@ -1,3 +1,4 @@
+![App Screenshot](./bosc_ghebo_nat_git.png)
 # boschettona2023
 
 This repository contains the R Scripts and Genome-scale metabolic models (GEMs) used to analyse the data from the paper "XXX". Raw sequencing reads are available at NCBI (PRJNA1226540).
