@@ -11,9 +11,9 @@ Processing and analysis of granulometry, CHNS, ICP-MS, GC-MS, LC-MS data
 - `bosc23_MAG_vOTU_selection_QC.Rmd`<br>
 Selection of medium-high quality metagenome-assembled genomes (MAGs) and screening of identified viral sequences.
 Descriptive statistics.
-- `bosc23_taxonomy.Rmd`<br>
+- `bosc23_MAG_vOTU_taxonomy.Rmd`<br>
 Processing, analysis and visualisation of MAG and vOTUs relative abundance data
-- `bosc23_analysis.Rmd`<br>
+- `bosc23_MAG_vOTU_analysis.Rmd`<br>
 Summary statistics for MAGs and viral Operational taxonomical units (vOTUs), analysis of vOTUs functional annotation and host prediction
 - `bosc23_metabolic_analysis.Rmd`<br>
 Analysis of GEMs and integration with metagenomics and metabolomics data
