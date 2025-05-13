@@ -1,6 +1,6 @@
 # boschettona2023
 
-This repository contains the R Scripts and Genome-scale metabolic models (GEMs) used to analyse the data from the paper "XXX". Raw sequencing reads are available at NCBI (PRNJAXXXX).
+This repository contains the R Scripts and Genome-scale metabolic models (GEMs) used to analyse the data from the paper "XXX". Raw sequencing reads are available at NCBI (PRJNA1226540).
 
 ## Scripts
 
