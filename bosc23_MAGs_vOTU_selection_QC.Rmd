@@ -1,0 +1,279 @@
+---
+title: "Bin, MAGs, vOTU selection and QC, Boschettona23"
+author: "Riccardo Frizzo"
+date: "2024-05-29"
+output:
+  pdf_document: default
+  html_document: default
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r eval=TRUE, tidy = TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 12, fig.height = 6)
+require(tidyverse); require(data.table)
+```
+
+```{r echo=F, message=FALSE, warning=TRUE}
+knitr::opts_chunk$set(echo = FALSE, fig.width = 7.5, fig.height = 7.5)
+```
+# MAGs
+## REPORT
+## (1) Average mapping rates of MHQ MAGs
+```{r, echo = T, warning=FALSE}
+# Import read counts
+tot_reads<-
+  fread("~/rstudio-server/storage16TB/riccardo/analysis_big_files/boschettona23/metaG/raw/multiqc_data/multiqc_general_stats.txt") %>% 
+  dplyr::select("Sample", matches("total_seq")) %>% 
+  mutate(Sample=str_remove_all(Sample, "metaG_|_[12]")) %>%
+  unique
+
+# Import MHQ-MAGs mapping datta
+bin_map_mhq<-
+  fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/coverm/mag_mapping")%>% dplyr::select(c(Genome,matches("Abundance"))) %>%
+  pivot_longer(cols= matches("Art|Nat"),names_to = "Sample", values_to = "rel_abund") %>%
+  mutate(
+    Sample=str_remove_all(Sample, "metaG_|_[12]|.fastq"),
+    Sample=str_remove_all(Sample, "[\\(\\%\\)]"),
+    Sample=str_remove_all(Sample, " Relative Abundance ")
+    )
+# Average MAG mapping rate
+bin_map_mhq %>% 
+  filter(Genome != "unmapped") %>% 
+  group_by(Sample) %>%
+  summarise(sum_mapped=sum(rel_abund)) %>%
+  summarise(mean=mean(sum_mapped),
+            sd=sd(sum_mapped))
+```
+
+## (2) Quality distribution of MHQ MAGs (derep)
+```{r, echo = T, warning=FALSE, message=FALSE, results='show'}
+fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/checkm2_mags/quality_report.tsv")%>% filter(Name %in% bin_map_mhq$Genome)->checkm
+
+checkm %>% summarise(
+  completeness_mean=mean(Completeness),
+  completeness_sd=sd(Completeness),
+  contamination_mean=mean(Contamination),
+  contamination_sd=sd(Contamination),
+  length_mean=mean(Genome_Size)/1e6,
+  length_sd=sd(Genome_Size)/1e6
+  )
+```
+
+## (3) Quality distribution of all MAGs
+```{r, echo = T, warning=FALSE, message=FALSE, results='show'}
+fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/checkm2_mags/quality_report.tsv")->checkm
+
+checkm %>% 
+  filter(Name %in% bin_map_mhq$Genome) %>%
+  summarise(
+  completeness_mean=mean(Completeness),
+  completeness_sd=sd(Completeness),
+  contamination_mean=mean(Contamination),
+  contamination_sd=sd(Contamination),
+  length_mean=mean(Genome_Size)/1e6,
+  length_sd=sd(Genome_Size)/1e6
+  )
+```
+
+#---
+# Viral contigs and vOTUs
+## PROCESS
+## (1) Detection and selection with geNomad and Virsorter 
+```{r, echo = T, warning=FALSE, message=FALSE, results='show'}
+libs<-c("tidyverse", "data.table", "magrittr"); invisible(lapply(libs, require, character.only = TRUE))
+# Import geNomad viruses, remove extra ID annotations
+genomad<-
+  fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/genomad/all_merged2_summary/all_merged2_virus_summary.tsv") %>%
+  mutate(
+    extra_annot=str_split(seq_name, "\\|", simplify = TRUE)[,2],
+    .after = "seq_name")
+
+names(genomad)[-1] = paste0("genomad_",names(genomad)[-1])
+
+# Import Virsorter2 viruses, remove extra ID annotations
+virsorter<-
+  fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/virsorter2/contigs2.5k_/final-viral-score.tsv") %>%  
+  mutate(
+    extra_annot=str_split(seqname, "\\|\\|", simplify = TRUE)[,2],
+    .after = "seqname") %>%
+  dplyr::rename(seq_name=seqname)
+names(virsorter)[-1] = paste0("virsorter_",names(virsorter))[-1]
+
+# Merge datasets
+genomad_virsorter<-full_join(genomad, virsorter, by="seq_name")
+```
+
+## (2) QC with CheckV
+
+```{r, echo = F, warning=FALSE, message=FALSE, results='show'}
+# Import checkV data
+checkv<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/checkv/quality_summary.tsv")
+names(checkv)[1] = "seq_name"
+names(checkv)[-1] = paste0("checkv_",names(checkv)[-1])
+
+# Merge checkV data with geNomad and Virsorter data
+merge(genomad_virsorter, checkv, by = "seq_name")-> genomad_virsorter_checkv
+
+# Select relevant columns
+genomad_virsorter_checkv %<>%
+  dplyr::select(
+    seq_name, genomad_taxonomy,
+    genomad_topology, genomad_coordinates, virsorter_extra_annot, checkv_provirus,
+    checkv_contig_length, checkv_proviral_length,
+    genomad_virus_score, virsorter_max_score, checkv_completeness, checkv_contamination, checkv_checkv_quality,
+    genomad_n_genes, genomad_n_hallmarks, virsorter_hallmark, checkv_viral_genes, checkv_host_genes)
+
+# Sum the number of hallmarks identified by the different tools
+# First, remove NAs
+genomad_virsorter_checkv %<>% 
+  mutate(across(where(is.numeric), ~ replace_na(., 0)))
+
+# Filter
+genomad_virsorter_checkv %>%  
+  filter(checkv_contig_length>2500) %>%
+  mutate(viral_genes_pass=
+           case_when(checkv_viral_genes>0 | genomad_n_hallmarks>0 | virsorter_hallmark>0 ~ T),
+         
+         score_pass=
+           case_when(virsorter_max_score>0.8 | genomad_virus_score>0.8| checkv_completeness>70 ~ T),
+         
+         host_genes_pass=
+           case_when(checkv_host_genes<2 ~ T),
+         
+         evaluation=
+           case_when(viral_genes_pass == T & score_pass == T & host_genes_pass == T ~ "pass",
+                     is.na(viral_genes_pass) & score_pass == T & host_genes_pass == T ~ "pass - no viral genes")
+         ) -> genomad_virsorter_checkv_QC
+
+# To pass a sequence must have either a viral gene OR high score a low contamination
+
+# Length filtering
+genomad_virsorter_checkv_QC %>%
+  filter(!is.na(evaluation)) %>%
+  mutate(length_filtering5k=
+           case_when(
+             checkv_contig_length>5e3 ~ "pass"),
+         short_filtering=
+           case_when(
+             is.na(length_filtering5k) &
+             checkv_completeness > 70 ~ "pass")) %>% 
+  filter(length_filtering5k == "pass" | short_filtering == "pass") -> genomad_virsorter_checkv_filtered
+
+genomad_virsorter_checkv_filtered$checkv_contig_length %>% hist
+
+dir.create("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/Rtables")
+fwrite(genomad_virsorter_checkv_filtered,
+"/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/Rtables/genomad_virsorter_checkv_filtered.csv")
+
+# Split virus and provirus
+genomad_virsorter_checkv_filtered %>% filter(genomad_topology == "Provirus" | checkv_provirus == "Yes") -> genomad_virsorter_checkv_filtered_provir
+
+genomad_virsorter_checkv_filtered %>% filter(!seq_name %in%  genomad_virsorter_checkv_filtered_provir$seq_name) -> genomad_virsorter_checkv_filtered_vir
+
+
+intersect(genomad_virsorter_checkv_filtered_provir$seq_name,
+          genomad_virsorter_checkv_filtered_vir$seq_name
+          )
+
+# Import all viral contigs
+Biostrings::readDNAStringSet("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/virus_contigs/virsorter_genomad_05sep24.fasta")->genomad_virsorter.fasta
+
+# Select filtered viral contigs, export
+HQ_virus_contigs <- genomad_virsorter.fasta[names(genomad_virsorter.fasta) %in% genomad_virsorter_checkv_filtered_vir$seq_name]
+
+fwrite(genomad_virsorter_checkv_filtered_vir,
+"/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/Rtables/genomad_virsorter_checkv_filtered_vir.csv")
+
+Biostrings::writeXStringSet(HQ_virus_contigs, filepath = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/virus_contigs/genomad_virsorter_checkv_filtered_vir.fasta")
+
+# Select filtered proviral contigs, export 
+HQ_provirus_contigs <- genomad_virsorter.fasta[names(genomad_virsorter.fasta) %in% genomad_virsorter_checkv_filtered_provir$seq_name]
+
+fwrite(genomad_virsorter_checkv_filtered_provir,
+"/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/Rtables/genomad_virsorter_checkv_filtered_provir.csv")
+
+Biostrings::writeXStringSet(HQ_provirus_contigs, filepath = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/virus_contigs/genomad_virsorter_checkv_filtered_provir.fasta")
+```
+
+## (3) Dereplicate with Vclust
+https://github.com/refresh-bio/vclust?tab=readme-ov-file#3-installation
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+vclust_vir<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/vclust/vir_clusters.tsv")
+vclust_provir<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/vclust/provir_clusters.tsv")
+
+# Select representative viral contigs, export
+vOTUs <- HQ_virus_contigs[names(HQ_virus_contigs) %in% vclust_vir$cluster]
+provOTUs<-HQ_provirus_contigs <- HQ_provirus_contigs[names(HQ_provirus_contigs) %in% vclust_provir$object]
+
+dir.create("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/OTU")
+Biostrings::writeXStringSet(vOTUs, filepath = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/OTU/votu.fasta")
+Biostrings::writeXStringSet(provOTUs, filepath = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/OTU/provotu.fasta")
+
+```
+
+
+
+#---
+## REPORT
+## Check diff and intersections between virsorter and genomad hits
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+#Check final selection
+virsorter %>% filter(seq_name %in% genomad_virsorter_checkv_filtered$seq_name) %>% pull(seq_name) -> ids_selected_virsorter
+genomad %>% filter(seq_name %in% genomad_virsorter_checkv_filtered$seq_name) %>%
+  pull(seq_name) -> ids_selected_genomad
+
+str_split(ids_selected_virsorter, "\\|", simplify = TRUE)[,1] -> ids_selected_virsorter2
+
+# Total number of sequences
+c(ids_selected_virsorter2, ids_selected_genomad) %>% length
+# Number of unique sequences found
+unique(ids_selected_virsorter2, ids_selected_genomad) %>% length
+# Number of sequences found by genomad and virsorter
+intersect(ids_selected_virsorter2, ids_selected_genomad) %>% length
+# Number of sequences found by genomad or virsorter
+setdiff(ids_selected_virsorter2, ids_selected_genomad) %>% length
+```
+
+## (4) Average mapping rates of vOTUs
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+vir_map<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/coverm/vir_map_count")
+names(vir_map)
+
+#Check
+#vir_map[,-1] %>% colSums() %>% plot
+
+tot_reads_vir<-
+  fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/reads/multiqc_data/multiqc_fastqc.txt") %>% 
+  dplyr::select("Sample", matches("Total Sequences")) %>%
+  mutate(Sample=str_remove(paste0(Sample, "_vir"), "_[12]")) %>%
+  unique %>%
+  rbind(tot_reads %>% rename("Total Sequences"=FastQC_total_sequences)) %>% janitor::clean_names()
+# Select columns 
+names(vir_map)[grepl("fq.gz", names(vir_map))] %<>% str_replace("1.fq.gz", "vir")
+
+
+# Tidy column names
+vir_map1<-vir_map
+names(vir_map1) %<>% 
+  str_remove_all("all_OTUs_no_doubleBB.fasta.|.fastq Read Count| Read Count|_1|metaG_")
+
+# Calcuate average cumulative mapping rate
+vir_map1 %>% 
+  pivot_longer(cols=matches("Art|Nat"), names_to = "sample", values_to = "count" ) %>% 
+  group_by(sample) %>% summarise(sum_count=sum(count)) %>% merge(tot_reads_vir, .by = "sample") %>%
+  mutate(prop=(sum_count/total_sequences)*100) %>% mutate(type=case_when(grepl("vir", sample) ~ "vir", .default = "metag")) %>% group_by(type) %>% summarise(mean=mean(prop), sd=sd(prop))
+
+
+```
+
+## (5) Quality distribution of vOTUs
+```{r, echo = T, warning=FALSE, message=FALSE, results='show'}
+vir_qual<-fread("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/Rtables/genomad_virsorter_checkv_filtered.csv") %>%
+  mutate(seq_name=str_replace(seq_name, "\\|\\|", "_")) %>%
+  filter(seq_name %in% vir_map$Contig)
+
+
+vir_qual %>% group_by(checkv_checkv_quality) %>% count
+```
+
