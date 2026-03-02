@@ -1,7 +1,9 @@
 ![App Screenshot](./bosc_ghebo_nat_git_cut.png)
 # boschettona2023
 
-This repository contains the R Scripts and Genome-scale metabolic models (GEMs) used to analyse the data from the paper "XXX". Raw sequencing reads are available at NCBI (PRJNA1226540).
+This repository contains the R Scripts and Genome-scale metabolic models (GEMs) used to analyse the data from the paper 
+"Metabolites and flux modelling reveal viral modulation of carbohydrates, carboxylates, and nucleotide-sugars in salt marsh sediments".
+Raw sequencing reads are available at NCBI (PRJNA1226540).
 
 ## Scripts
 
