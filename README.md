@@ -16,7 +16,6 @@ Descriptive statistics.
 Processing, analysis and visualisation of MAG and vOTUs taxonomy and relative abundance data.
 - `bosc23_integrative_analysis.Rmd`<br>
 Analysis of GEMs and integration with metagenomics, viromics, and metabolomics data
-- `bosc23_metabolic_analysis.Rmd`<br>
 
 ## GEMs available at: https://figshare.com/s/a9e23bab7e9995b3fd7b
   Compressed archives containing all Genome-scale metabolic models analysed in the manuscript, in .xml and .RDS format.
