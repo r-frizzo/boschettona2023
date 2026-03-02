@@ -44,9 +44,16 @@ find_int_multiplier <- function(var, mult=1e2) {
 hcl.colors(n=3, palette ="Zissou 1",alpha = 0.9)
 zy=c("#3B99B1E6","#FADB2BE6","#A5191CE6")
 zy=c("#A5191CE6","white","#65B59AE6")
-scales::show_col(zy[c(3,1,2)],ncol = 3)
+#scales::show_col(zy[c(3,1,2)],ncol = 3)
 saltmarsh_colors = c(Constructed=zy[1], Natural=zy[3], ns = zy[2])
+
+## Variables
+qprobs=seq(0,1,0.01)
+load("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/tax/tree_colors_14apr25.RData")
+tree_colors<-c(tree_colors, "gray10")
+names(tree_colors)[15]="Thermoproteota" #Add the archaea :)
 ```
+
 #---
 # MAGS
 ## PROCESS
@@ -551,157 +558,8 @@ ggsave(plot = gg_mag_barplot_phylum, "~/rstudio-server/nvme_4tb/riccardo/analysi
        )
 ```
 
-# PLOT: PhyloTree
-```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
-mag_analysis<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_analysis_co_de_24sep24.tsv")
 
-#Plotting variables
-#pm<-c(-2,-2,-2,-2)
-pm<-c(0,0,0,0)
-
-pal<-"Zissou 1"
-tree_colors<-hcl.colors(n = length(unique(mag_taxonomy$phylum)), palette = pal, rev = T)
-require(colorspace)
-c(darken("#F5191C", 0.3), "#ED5600", darken("#E2BAD5", 0.3), lighten("#E79C05", 0.3), "salmon", darken("#39A6A9", 0.3), "yellow2", "#CECA87","pink",  "#95BE95", "#C75DAA", "slateblue4", "#37C6A9", lighten("blue", 0.7)) %>% alpha(0.8) -> tree_colors
-names(tree_colors)=unique(mag_taxonomy$phylum)
-
-# Add class
-tree_data %<>% 
-  mutate(class= str_remove(str_extract(taxonomy, "c__[:alnum:]+"), "c__"))
-#Plot tree
-ggtree(tree_data, layout="fan", open.angle=10, size = 0.2) +
-  theme(legend.position = "none", plot.margin = unit(pm, "cm")) +
-    scale_color_manual(
-    values = tree_colors[1:length(unique(mag_taxonomy$phylum))],
-    na.value = "black") +
-  scale_size_continuous(range = c(0.05, 0.5))-> tree;tree # Base tree
-
-mag_MPSE_norm %>% 
-  as.data.frame %>% 
-  dplyr::select(OTU, RelhellingerBySample, Sample, Group) -> abund
-
-tree1 <- tree  +
-  geom_tippoint(mapping=aes(color=phylum), 
-                   size=1,
-                   show.legend=TRUE) # Colored tips
-
-mag_analysis %>% dplyr::select(OTU, condition_higher_abund) -> diff
-
-#metC %>% pivot_longer(cols=contains("input")) -> test
-require(ggtreeExtra)
-library(ggnewscale)
-
-tree1 +        
-  geom_fruit(
-    data=abund,
-    geom=geom_tile,
-    mapping=aes(
-      y=OTU, x=Sample,
-      alpha=(RelhellingerBySample), fill= Group),
-      color = "grey50",
-    offset = 0.02,
-    size = 0.02,
-    linewidth = 0.1,
-    axis.params =list(
-     axis="x", text.angle = 60, text.size=1, hjust=1.1, vjust = 0.1)) +
-
-  geom_fruit(data=diff, geom=geom_tile,
-                  mapping=aes(y=OTU, fill=condition_higher_abund),
-                  color = "grey50", offset = 0.03, pwidth = 0.05,  size = 0, linewidth = 0.1) +
-    scale_fill_manual(values = saltmarsh_colors)-> tree2;tree2 
-
-#add abundance heatmap
-abund %>% group_by(OTU, Group) %>% summarise(mean=mean(RelhellingerBySample)) -> abund_mean
-tree2 + 
-  geom_fruit(
-    data=abund_mean, geom=geom_bar,
-    mapping=aes(y=OTU, x=mean, fill= Group),
-    pwidth=0.38, 
-    orientation="y", 
-    stat="identity",
-    color = "black",
-    linewidth = 0.1) -> tree3 # add cumulative abundance
-
-#tax_rank<- tree_data %>% filter(!is.na(phylum)) %>% pull(phylum) %>% unique
-tax_rank<- tree_data %>% filter(!is.na(class)) %>% pull(class) %>% unique
-
-# Prepare a dataset for label text, position, and angle
-require(foreach)
-foreach (i = tax_rank)%do%{
-tree_data %>% filter(class == i) -> tp
-  data.frame(angle = mean(tp$angle),
-             node = MRCA(tree, tp$label),
-             tax = str_remove_all(i, " "))
-  } %>% rbindlist() -> label_positions
-
-# Edit the angle and label position to perfect the tree
-label_positions[17,]$angle = 0
-#label_positions[20,]$angle = 0
-#label_positions[17,]$angle = 0
-
-# Plot the three
-{tree3->tree4
-for (i in 1:nrow(label_positions)){
-tree4 +
-  geom_cladelab(node=label_positions$node[i],
-                label=paste0(label_positions$tax[i],""),
-                offset = 1.3, #linear =-2.05,
-                offset.text = 0.05,
-                align = T,
-                hjust = -0.1, #linear = 1.1
-                fontsize = 3, #1.5
-                color = NA,
-                angle = label_positions$angle[i] # linear=0
-                )-> tree4
-};tree4
-  }
-
-tree4 + 
-    theme(
-    plot.margin = margin(2.5, 1, 0, 1, "cm"),     # Adjust margins
-    aspect.ratio = 1,                           # Square plot (optional)
-    legend.position = "bottom"
-  )  +  guides(
-    fill = guide_legend(
-      override.aes = list(size = 4)),
-    color = guide_legend(
-      override.aes = list(size = 4)),
-    alpha = guide_legend(
-      override.aes = list(size = 4)) # Set size of legend bullet points
-    ) -> tree5
-
-tree5
-ggsave(plot = tree5, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_circ_4apr25.png",
-       width = 45,
-       height = 20,
-       dpi = 300,
-       units = "cm"
-       )
-
-# Settings for linear version
-tree4 +
-  scale_x_continuous(
-    limits = c(-1.5, 3.5)) +
-  scale_y_continuous(
-    limits = c(-10, 290))-> tree_linear
-
-ggsave(plot = tree_linear, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_rect.png",
-       width = 8,
-       height = 15,
-       dpi = 600,
-       units = "cm"
-       )
-
-ggsave(plot = tree_linear, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_rect.png",
-       width = 6,
-       height = 14,
-       dpi = 600
-       )
-
-
-```
-
-# PLOT: PhyloTree simple
+# PLOT: PhyloTree no RES/NAT
 ```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
 mag_analysis<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_analysis_co_de_24sep24.tsv")
 
@@ -738,7 +596,7 @@ tree_data %<>%
     family= (str_extract(taxonomy, "f__[:alnum:]+")),
          )
 #Plot tree
-ggtree(tree_data, layout="fan", open.angle=0, size = 0.2) +
+ggtree(tree_data, layout="fan", open.angle=7, size = 0.2) +
   theme(legend.position = "none", plot.margin = unit(pm, "cm")) +
     scale_color_manual(
     values = tree_colors[1:length(unique(mag_taxonomy$phylum))],
@@ -747,7 +605,7 @@ ggtree(tree_data, layout="fan", open.angle=0, size = 0.2) +
 
 mag_MPSE_norm %>% 
   as.data.frame %>% 
-  dplyr::select(OTU, RelhellingerBySample, Sample, Group) -> abund
+  dplyr::select(label=OTU, RelhellingerBySample, Sample, Group) -> abund
 
 tree1 <- tree  +
   geom_tippoint(mapping=aes(color=phylum), 
@@ -758,24 +616,33 @@ mag_analysis %>% dplyr::select(OTU, condition_higher_abund) -> diff
 
 require(ggtreeExtra)
 library(ggnewscale)
+
+
 tree1 + 
-  geom_fruit(data=diff, geom=geom_tile,
-                  mapping=aes(y=OTU, fill=condition_higher_abund),
-                  color = "grey50", offset = 0.03, pwidth = 0.05,  size = 0, linewidth = 0.1) +
-    scale_fill_manual(values = saltmarsh_colors)-> tree2;tree2 
-
-#add abundance heatmap
-abund %>% group_by(OTU, Group) %>% summarise(mean=mean(RelhellingerBySample)) -> abund_mean
-
-tree2 + 
+  #ggnewscale::new_scale_fill() +
   geom_fruit(
-    data=abund_mean, geom=geom_bar,
-    mapping=aes(y=OTU, x=mean, fill= Group),
+    data=abund, geom=geom_boxplot,
+    mapping=aes(y=label, x=RelhellingerBySample, fill=phylum),
     pwidth=0.38, 
-    orientation="y", 
-    stat="identity",
-    color = "black",
-    linewidth = 0.1) -> tree3 # add cumulative abundance
+    #color = "black",
+    linewidth = 0.15,
+    outlier.size = 0.01,
+    outlier.alpha = 0.5,
+    outlier.shape=1,
+    axis.params=list(
+                     axis       = "x",
+                     text.size  = 1.5,
+                     hjust      = 1,
+                     vjust      = 1.5,
+                     nbreak     = 6,
+                     text.angle = 45,
+                     color="black"
+                     ),
+         grid.params=list()
+    ) +
+    scale_fill_manual(
+    values = tree_colors[1:length(unique(mag_taxonomy$phylum))],
+    na.value = "black") -> tree3;tree3 # add cumulative abundance
 
 tree3 + 
     theme(
@@ -791,32 +658,24 @@ tree3 +
       override.aes = list(size = 4)) # Set size of legend bullet points
     ) -> tree4
 
-ggsave(plot = tree3, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_circ__clean_nolegend_8apr25.png",
+ggsave(plot = tree3, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_circ__clean_noresnat_9dic25.png",
        width = 15,
        height = 15,
        dpi = 600,
        units = "cm"
        )
+file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_circ__clean_noresnat_9dic25.png")
 
-ggsave(plot = tree4, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_circ_clean_legend_8apr25.png",
+ggsave(plot = tree4, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_circ_clean_legend_noresnat_9dic25.png",
        width = 15,
        height = 15,
        dpi = 600,
-       units = "cm"
-       )
-
-tree3 +
-  geom_tiplab(aes(label=genus),hjust = -0.2, offset = 1, align = TRUE, size = 2, linesize = 0) +
-  geom_tiplab(aes(label=family),hjust = -0.2, offset = 3, align = TRUE, size = 2, linesize = 0.1) +
-  geom_tiplab(aes(label=label),hjust = -0.2, offset = 5, align = TRUE, size = 2, linesize = 0.1)-> tree5
-ggsave(plot = tree5, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_phylotree_circ__fam_gen_4apr25.png",
-       width = 45,
-       height = 25,
-       dpi = 300,
        units = "cm"
        )
 
 ```
+
+
 
 #---
 # vOTUs
@@ -1480,6 +1339,81 @@ dev.off()
 #vir_analysis 
 ```
 
+### Fig 3: GRAPH: vContact3 degree 1 host order
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+iphop_mags2 %>%
+  select(votu=virus, Order) %>%
+  mutate(Order=str_remove(Order, "o__")) %>% unique -> host_order
+
+require(igraph)
+data.table(
+  node=V(vcn_noref),
+  deg = igraph::degree(vcn_noref)) %>% 
+  filter(deg>=1) %>% 
+  pull(node)-> sel
+
+g <- induced_subgraph(vcn_noref, sel)
+g %>% igraph::edge_attr() %>% names
+g %>% igraph::vertex_attr() %>% names
+E(g)$weight = as.numeric(E(g)$weight)
+E(g)$color = rep("gray90",length(E(g)))
+V(g)$size=1+(V(g)$mean_vir_all*50)
+V(g)$host=host_order[match(V(g)$votu, votu), Order]
+
+vertex_colors= factor(
+  x=V(g)$host,
+  levels = unique(V(g)$host),
+  labels = hcl.colors(n=length(unique(V(g)$host))-1, palette = "Zissou 1"))
+
+V(g)$color=as.character(vertex_colors)
+
+# Check colors
+colorspace::swatchplot(levels(vertex_colors), cvd = TRUE)
+
+#Load layout for consistency  
+load(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/vcontact_net_vir_layout_7apr25.RData")
+
+{
+
+png(filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/vcontact_net_deg1_host_order.png",
+    width = 20, height = 40, res = 600, units = "cm")
+#par(mai = unit(c(19, 19, 19, 19), "cm"))
+plot(g,
+     layout = l*1.5, # Recycle the layout of the taxonoym graph
+     vertex.label=NA)
+
+# Add a size legend
+size_legend_values <- c(min(V(g)$size), mean(V(g)$size), max(V(g)$size))
+size_legend_labels <- round(c(min(V(g)$mean_vir_all), mean(V(g)$mean_vir_all), max(V(g)$mean_vir_all)), 2)
+legend(
+  "topright", 
+  legend = size_legend_labels, 
+  pt.cex = size_legend_values / max(size_legend_values) * 2,  # Scale legend point sizes
+  pch = 21, 
+  pt.bg = "black", 
+  bty = "n", 
+  title = "Vertex Size"
+)
+
+legend(
+  "bottom", 
+  legend = unique(V(g)$host)[-1],
+  col = levels(vertex_colors),
+  y.intersp = 0.9,
+  ncol = 1,
+  pt.cex = 2,  # Scale legend point sizes
+  pch = 16, 
+  #pt.bg = "black", 
+  bty = "n", 
+  title = "AUX/OTH gene",inset = c(0, 0.8)
+)
+
+dev.off()
+}
+file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/figures/vcontact_net_deg1_host_order.png")
+#vir_analysis 
+```
+
 ### Fig 3: GRAPH: vContact3 degree 1 cluster with reference
 ```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
 vir_analysis<-fread(file = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_analysis_10apr25.csv")
@@ -1633,7 +1567,7 @@ scales::show_col(virus_class_colors,ncol = 3)
 save(virus_class_colors,file = "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/virus_class_colors.RData")
 ```
 
-### Double check genomas and virsorter quality of vOTUs
+### Double check genomes and virsorter quality of vOTUs
 ```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=T}
 # Import geNomad viruses, remove extra ID annotations
 genomad<-
@@ -1659,11 +1593,221 @@ genomad_virsorter<-full_join(genomad, virsorter, by="votu")
 
 genomad_virsorter %>% dplyr::select(votu, genomad_virus_score, virsorter_max_score, virsorter_viral)
 ```
+## MAG - vOTUs
+### Relative abundances of MAGs and vOTUs
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+iphop_mags<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/iphop_mags_vOTUs/Host_prediction_to_genome_m90.csv") %>% janitor::clean_names()
 
-# ---
+iphop_mags$host_taxonomy %>%
+  str_split(';', simplify = T) %>%
+  as.data.frame -> iphop_expanded_tax
+names(iphop_expanded_tax) = c('Domain', 'Phylum', 'Class', 'Order', 'Family', 'Genus', 'Species')
+iphop_expanded_tax$Order %>% table %>% sort
+
+cbind(iphop_mags, iphop_expanded_tax) %>% data.table -> iphop_mags2
+
+iphop_mags2 %>%
+  group_by(Order) %>%
+  summarise(nvotu=length(unique(virus))) %>% arrange(desc(nvotu))
+
+# Relative abundance of linked MAGs
+mag_MPSE_norm %>% data.frame %>%
+  filter(Order %in% iphop_mags2$Order) %>%
+  dplyr::select(OTU, Phylum, Order, RelhellingerBySample)-> mag_host_order
+
+mag_host_order %>% 
+  group_by(Order) %>%
+  summarise(median=median(RelhellingerBySample)) %>%
+  arrange(median) -> sorted_mags
+
+# Relative abundance of linked vOTUs
+vir_MPSE_norm %>% data.frame %>%
+  filter(OTU %in% iphop_mags2$virus) %>%
+  dplyr::select(virus=OTU, RelhellingerBySample)-> votu_host_order
+
+votu_host_order %>%
+  left_join(iphop_mags2, by="virus") %>%
+  filter(Order %in% mag_host_order$Order) %>%
+  dplyr::select(virus, Phylum, Order, RelhellingerBySample) %>%
+  unique -> votu_host_order2
+
+votu_host_order2 %>% 
+  group_by(Order) %>%
+  summarise(mean=mean(RelhellingerBySample)) %>%
+  arrange(desc(mean)) %>%
+  fwrite("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/votu_host_order_mean.csv")
+
+# Sort by prok orders by numbeer of prediction
+iphop_mags2 %>% 
+  group_by(Phylum, Order) %>%
+  summarise(sum=length(unique(virus))) %>%
+    arrange(sum)-> sorted_votus2
+
+# Number on Order-vOTU links
+  iphop_mags2 %>%
+  filter(Order %in% mag_host_order$Order &
+        !grepl("SemiBin", host_genome) 
+           ) %>%
+  group_by(Phylum, Order) %>%
+  summarise(sum=length(unique(virus))) %>%
+    arrange(sum)-> votu_host_order_count
+  
+  votu_host_order_count$sum %>% sum
+  
+  # Number on MAG-vOTU links
+  iphop_mags2 %>%
+  filter(grepl("SemiBin", host_genome)) %>%
+  group_by(Phylum, Order) %>%
+  summarise(sum=length(unique(virus))) -> votu_host_MAG_count
+  
+    votu_host_MAG_count$sum %>% sum
+
+  
+  rbind(
+    votu_host_order_count %>% add_column(type="Order-vOTU prediction"),
+    votu_host_MAG_count %>% add_column(type="MAG-vOTU prediction")
+  ) -> votu_host_order_MAG_count2
+  
+  votu_host_order_MAG_count2 %>%
+    filter(sum>1) %>% pull(Order) %>% str_remove("o__") -> freq_order
+  
+# Sort each table by Order avg abundance
+votu_host_order2$Order = 
+  factor(votu_host_order2$Order, levels = sorted_votus2$Order, 
+         labels=str_remove(sorted_votus2$Order,"o__"))
+
+mag_host_order$Order = 
+  factor(mag_host_order$Order, levels = sorted_votus2$Order, 
+         labels=str_remove(sorted_votus2$Order,"o__"))
+
+votu_host_order_MAG_count2$Order = 
+  factor(votu_host_order_MAG_count2$Order, levels = sorted_votus2$Order, 
+         labels=str_remove(sorted_votus2$Order,"o__"))
+
+mag_host_order %>%
+  mutate(Phylum = str_remove(Phylum, "p__"),
+         ) %>%
+  filter(Order %in% freq_order) %>%
+  ggplot(aes(y=Order, x=RelhellingerBySample, fill= Phylum)) +
+  geom_boxplot(outlier.size = 0.3) +
+  ggtitle("MAG order Relative abundance (%)") +
+  ylab("") +
+  theme_bw() +
+    theme(
+        axis.title.x = element_blank(),
+        legend.position = "none",
+        legend.text  = element_text(size = 6),
+        legend.title = element_text(size = 8),
+        plot.title = element_text(hjust = 0.5, size=10),
+        axis.text.y = element_blank(),
+
+        ) +
+  scale_fill_manual(values = tree_colors) +
+    labs(fill = "MAG phylum")-> p1
+  
+
+votu_host_order2 %>%
+  filter(Order %in% c(freq_order)) %>%
+    mutate(
+      Phylum = str_remove(Phylum, "p__"),
+         ) %>%
+  ggplot(aes(y=Order, x=RelhellingerBySample, fill=Phylum)) +
+  geom_boxplot(outlier.size = 0.3) +
+  ggtitle("vOTU relative abundance (%)") +
+  theme_bw() +
+  theme(axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.text  = element_text(size = 9),
+        legend.title = element_text(size = 11),
+        plot.title = element_text(hjust = 0.5, size=10),
+        #legend.position = "none"
+        ) +
+  scale_fill_manual(values = tree_colors) +
+  labs(fill = "Host phylum")-> p2
+  
+votu_host_order_MAG_count2 %>%
+      mutate(Phylum = str_remove(Phylum, "p__")) %>%
+      filter(Order %in% freq_order) %>%
+  ggplot(aes(y=Order, x=sum, color=type)) +
+  geom_bar(stat="identity", position ="stack", fill="white") +
+  ggtitle("Number of vOTUs\n with host prediction") +
+  theme_bw() +#
+  ylab("Host order") +
+  scale_fill_manual(values = tree_colors, guide = "none") +
+  scale_color_manual(values=c("red", "black")) +
+    labs(color = "Prediction type")+
+  theme(#axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        #axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        #panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        legend.position = "left",
+        plot.title = element_text(hjust = 0.5, size=10),
+        legend.text  = element_text(size = 9),
+        legend.title = element_text(size = 11),
+        legend.key = element_rect(fill="white",linewidth = 0)
+        ) -> p3;p3 
+
+
+require(patchwork)
+design<-"AABB"
+p3 + p2  + plot_layout(design = design, guides = "collect") ->pw;pw
+
+ggsave(
+  pw,
+  filename="~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_votu_abund_boxplot_02jan26.png",dpi = 600, height = 14, width = 25, units = "cm"
+  )
+file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_votu_abund_boxplot_02jan26.png")
+
+ggsave(
+  pw,
+  filename="~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_votu_abund_boxplot_02jan26.pdf",dpi = 600, height = 14, width = 25, units = "cm"
+  )
+file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/mag_votu_abund_boxplot_02jan26.pdf")
+```
+
+### TEST: which host orders have the highest votu rel abund?
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
+
+votu_host_order2
+
+votu_host_order2 %>%
+  group_by(Order) %>%
+  count %>% filter(n>=5)-> testable
+testable
+
+dt$RelhellingerBySample %>% shapiro.test()
+
+  votu_host_order2 -> dt
+  g <- unique(dt$Order)
+  do.call(rbind, lapply(g, function(gr) {
+    x <- dt$RelhellingerBySample[dt$Order == gr]
+    y <- dt$RelhellingerBySample[dt$Order != gr]
+    data.frame(
+      group = gr,
+      n_group = length(x),
+      n_rest = length(y),
+      median_group = median(x, na.rm = TRUE),
+      median_rest = median(y, na.rm = TRUE),
+      p_value = wilcox.test(x, y, alternative = "greater", exact = FALSE)$p.value
+    )
+      })) -> df
+  
+  df %>%
+      add_column(p_adj=
+        df$p_value %>% p.adjust(method = "fdr")) %>%
+  filter(p_adj<0.05 & n_group>=5) %>% filter(median_group>0) %>%
+    mutate(FC=(median_group-median_rest)/median_rest)
+
+
+```
+ ---
 # REPORT
 
-### (3) Diff Summary
+### Diff Summary
 ```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=FALSE}
 vir_analysis<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_analysis_03jan25.csv")
 
@@ -1847,24 +1991,21 @@ vir_analysis %>%
       (mean_vir_abund_Nat == 0 & mean_vir_abund_Con>0) ~ T, .default = F)
   ) %>% group_by(condition_higher_abund, presence_absence) %>% count
 ```
-# PLOT: Barplots
-```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
-load(
-     file="~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/vir_MPSE_norm_04Oct24.RData"
-     )
-vir_MPSE_norm %>%
-          mp_plot_abundance(
-            .abundance=RelhellingerBySample,
-            .group=Group,
-            taxa.class = Phylum,
-            topn = 20,
-            relative = FALSE,
-            force = T
-          ) -> gg_vir_barplot_phylum
 
-ggsave(plot = gg_mag_barplot_phylum, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/presentations/mag_barplot_phylum.png",
-       width = 10,
-       height = 6,
-       dpi = 600
-       )
+# Supp. file 4 contig taxonomy counts
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+fread("~/rstudio-server/storage16TB/riccardo/analysis_big_files/boschettona23/metaG/coassemby_07feb24/art/sqm/art/results/tables/art.class.nofilter.abund.tsv") -> contig_tax_class_1
+fread("~/rstudio-server/storage16TB/riccardo/analysis_big_files/boschettona23/metaG/coassemby_07feb24/nat/sqm/nat/results/tables/nat.class.nofilter.abund.tsv") -> contig_tax_class_2
+
+full_join(contig_tax_class_1, contig_tax_class_2) -> contig_tax_class
+
+contig_tax_class %>%
+  pivot_longer(cols=matches("metaG")) %>%
+  mutate(value=case_when(is.na(value) ~ 0, .default = value)) %>%
+  group_by(V1) %>%
+  summarise(mean=mean(value,na.rm = F),
+            sd=sd(value)) %>%
+
+fwrite("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/contig_tax_counts.csv", sep = "\t", dec = ",")
+
 ```
