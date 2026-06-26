@@ -1,7 +1,7 @@
 ---
 title: "Boschettona23 - Taxonomy"
 author: "Riccardo Frizzo"
-date: "2024-08-06"
+date: "2026-06-26"
 output:
   word_document: default
   pdf_document: default
@@ -212,8 +212,8 @@ filter(id %in% cluster_OTU_ids) %>%
 
 #Clean the environment
 #rm(list=ls()[-which(ls() %in% keep_obj)])
-
 ```
+
 ## REPORT
 ## (2) Taxonomic distribution of MHQ MAGs (Phylogenetic tree)
 
@@ -675,6 +675,13 @@ ggsave(plot = tree4, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/
 
 ```
 
+ANI 99 vs ANI 95
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show'}
+df<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/mags95_clusters.tsv", header = F)
+df$V1 %>% unique %>% length
+
+mag
+```
 
 
 #---
