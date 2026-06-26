@@ -1,7 +1,7 @@
 ---
 title: "Abiotic measures Boschettona 23"
 author: "Riccardo Frizzo"
-date: "2024-06-10"
+date: "2026-06-26"
 output:
   pdf_document: default
   html_document: default
@@ -24,15 +24,13 @@ zy=c("#A5191CE6","white","#65B59AE6")
 scales::show_col(zy[c(3,1,2)],ncol = 3)
 saltmarsh_colors = c(Constructed=zy[1], Natural=zy[3], ns = zy[2])
 saltmarsh_colors2 = c(Restored=zy[1], Natural=zy[3], ns = zy[2])
-
-
 ```
 
 # Granulometry
 ```{r eval=TRUE, tidy = TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
 libs<-c("tidyverse", "foreach","data.table", "readxl", "magrittr", "ggstatsplot", "colorspace", "rstatix","knitr", "kableExtra"); lapply(libs,require,character.only=T)
 setwd("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/granulometry/")
-files<-list.files(pattern = ".xlsx", path = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/granulometry/",
+files<-list.files(pattern = ".xlsx", path = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/granulometry",
                   full.names = T)
 
 # Import data ----
@@ -95,6 +93,16 @@ gran_group_sum %>% group_by(Group, Wentworth) %>% summarise(
 
 ```
 
+### Gran mean and SD
+
+```{r, echo = FALSE, warning=F, message=FALSE, tidy=TRUE}
+gran_group_sum %>% group_by(Wentworth)%>%
+  summarise(
+  mean=mean(sample_sum),
+  sd=sd(sample_sum)) %>%
+  arrange(mean) -> gran_mean
+```
+
 Data is normally distributed within experimental groups and Wentworth classes
 
 ### Test significance: T-Test and Wilcox
@@ -114,42 +122,32 @@ gran_group_sum %>% group_by(Wentworth)%>%
 ```
 
 ## Visual summary: boxplots
-```{r, echo = FALSE, warning=F, message=FALSE}
+```{r, eval=T, echo = FALSE, warning=F, message=FALSE}
 require(ggbreak)
-ggplot(gran_group_sum, aes(y=(sample_sum), x= Wentworth, color=Group)) +
+ggplot(gran_group_sum, aes(y=(sample_sum), x= Wentworth)) +
   geom_boxplot(linewidth = 0.5, outliers = F) + 
   geom_jitter(position = position_dodge2(0.8),
                alpha = 0.5, size=0.3) +
-  theme_minimal() + 
-  scale_color_manual(values = saltmarsh_colors) +
+  theme_bw() + 
   ylab("Volume proportion (%)") + 
   xlab("") + 
+  ggtitle("Granulometry") +
     ylim(c(0,80)) +
-  scale_y_break(
-    c(15, 65),
-    scales = "fixed",
-  expand = F, space = 0.5) + 
-    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6),
-          axis.text.y = element_text(angle = 0, hjust = 0, size = 6),
-          axis.title.y = element_text(hjust = 0.8, size=8),
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 14),
+          axis.text.y = element_text(angle = 0, hjust = 0, size = 15),
+          axis.title.y = element_text(size=15),
           legend.position = "none",
-          plot.margin = unit(c(1, 1, 1, 1), "cm")
+          plot.title = element_text(size = 18, face = "bold")
           )-> gg_gran;gg_gran
 
 ggsave(plot = gg_gran, 
-       "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/granulometry_wentworth.png",
+       "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/granulometry_wentworth_11may26.png",
        width = 9,
        height = 7,
        units = "cm",
        dpi = 600,bg = "white"
        )
 
-ggsave(plot = gg_gran, 
-       "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/presentations/granulometry_wentworth.png",
-       width = 8,
-       height = 4,
-       dpi = 600,bg = "white"
-       )
 ```
 
 No significant differences were found, accepting the null hypothesis for all Wentworth classes
@@ -205,19 +203,22 @@ CHN_l %>% group_by(Element, Group) %>% count
 levels(CHN_l$Element)
 
 CHN_l %>%
-  ggplot(aes(x=Element, y=Proportion, color=Group)) +
+  filter(Element != "TS") %>%
+  ggplot(aes(x=Element, y=Proportion)) +
   geom_boxplot(linewidth = 0.5, outliers = F) + 
   geom_jitter(position = position_dodge2(0.8),
-               alpha = 0.5, size=0.3) +
-    theme_minimal() + 
+              size= 1) +
+    theme_bw() + 
     scale_color_manual(values = saltmarsh_colors) +
     ylab(" Mass composition (%)") + 
     xlab("") +
-      theme(axis.text.x = element_text(angle = 0, hjust = 1, size = 8),
-          axis.text.y = element_text(angle = 0, hjust = 0, size = 8),
-          axis.title.y = element_text(hjust = 0.5, vjust =  2, size = 8),
+    ggtitle("CHN & TOC") +
+      theme(axis.text.x = element_text(angle = 0, hjust = 1, size = 15),
+          axis.text.y = element_text(angle = 0, hjust = 0, size = 15),
+          axis.title.y = element_text(hjust = 0.5, vjust =  2, size = 15),
           legend.position = "none",
-          plot.margin = unit(c(1, 1, 1, 1), "cm")
+          plot.margin = unit(c(1, 1, 1, 1), "cm"),
+          plot.title = element_text(size=18, face = "bold")
           )->gg_chn;gg_chn
 
 ggsave(plot = gg_chn, 
@@ -332,15 +333,15 @@ ggplot(nvdi_nc, aes(x=group, y=`C0/mean`)) +
 ## Assigned signals: preprocess
 ```{r, echo = FALSE, warning=F, message=FALSE}
 require(readxl);
-
 #Import LC data
 read_excel("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaB/Features_Identified_Riccardo2_bysample.xlsx", sheet = 1)%>% 
   dplyr::select(`Metabolite name`, matches("ART|NAT"))-> LC_metab_areas
  colnames(LC_metab_areas) %<>% str_replace("ART", "CON") #fix sample names
-
-
+ 
 # Import LC assigned metabolites metadata
 read_excel("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaB/Features_Identified_Riccardo2.xlsx", sheet = 1) %>% add_column(data_type="LC")-> LC_metab_ids
+
+
 
 # Remove ID missing in the matrix
 #LC_metab_ids %>% filter(`Metabolite name` != "Tryptophan betaine") -> LC_metab_ids
@@ -404,10 +405,53 @@ metab_ids_curated_names[!duplicated(metab_ids_curated_names$Metabolite),] -> met
 
 # Make df
 metab_ids_curated_names[,-1] %>% column_to_rownames("Metabolite")-> metab_ids_curated_names_df
+
+
+metab_classes<-
+  data.table(
+  Subclass=metab_ids_curated_names_df$Subclass %>% unique,
+  Class=coarse_class <- c(
+    "Fatty Acyls",
+    "Other nitrogen/sulfur compounds",
+    "Alcohols & Polyols",
+    "Fatty Acyls",
+    "Amino acids & Peptides",
+    "Organic acids",
+    "Carbohydrates",
+    "Organic acids",
+    "Organic acids",
+    "Fatty Acyls",
+    "Fatty Acyls",
+    "Organic acids",
+    "Other nitrogen/sulfur compounds",
+    "Nucleosides & Nucleotides",
+    "Nucleosides & Nucleotides",
+    "Nucleosides & Nucleotides",
+    "Nucleosides & Nucleotides",
+    "Nucleosides & Nucleotides",
+    "Alkaloids",
+    "Organic acids",
+    "Organic acids",
+    "Organic acids",
+    "Organic acids",
+    "Aromatic compounds",
+    "Aromatic compounds",
+    "Other nitrogen/sulfur compounds",
+    "Aromatic compounds",
+    "Fatty Acyls",
+    "Aromatic compounds",
+    "Other nitrogen/sulfur compounds"
+  ))
+
+metab_ids_curated_names %>%
+  left_join(metab_classes) -> metab_ids_curated_names1
+
+metab_ids_curated_names1 %>% 
+  fwrite("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/metab_ids_curated_names_03giu26.csv")
 ```
 
 # LC-MS
-##Tidy bysample dataset and prepare matrix
+##Tidy bysample dataset and prepare matrix (Remove sample NAT3.1)
 ```{r, echo = FALSE, warning=F, message=FALSE}
 # Tidy names
 LC_metab_areas %>% dplyr::rename(name_orig=`Metabolite name`) %>%
@@ -457,11 +501,17 @@ fwrite(x=LC_mat_norm %>% as.data.frame %>% rownames_to_column("metabolite"),
 ## Summarise abundance by categories
 ```{r, echo = FALSE, warning=F, message=FALSE}
 # Count and sort classes
-metab_ids_curated_names %>%
+metab_ids_curated_names1 %>%
   filter(
     name_orig %in% metab_ids_curated_names$name_orig & 
       name_orig %in% LC_metab_areas$`Metabolite name`) %>%
-  group_by(Subclass) %>% count %>% arrange(desc(n)) -> sorted_metabolite_class
+  group_by(Subclass) %>% count %>% arrange(desc(n)) -> sorted_metabolite_subclass
+
+metab_ids_curated_names1 %>%
+  filter(
+    name_orig %in% metab_ids_curated_names$name_orig & 
+      name_orig %in% LC_metab_areas$`Metabolite name`) %>%
+  group_by(Class) %>% count %>% arrange(desc(n)) -> sorted_metabolite_class
 
 # Summarise signal area by metabolite
 LC_metab_ids %>% 
@@ -484,7 +534,7 @@ LC_metab_avg_area_1 %>%
 ```
 
 ## Visual summary: heatmap by sample
-```{r, echo = FALSE, warning=F, message=FALSE}
+```{r, echo = FALSE, warning=F, message=FALSE, eval = F}
 min_fontsize=4
 # Set molecular classes as row annotation, sort by size of the category
 lev<-metab_ids_curated_names_df[rownames(LC_metab_areas_mat),"Subclass"] %>%
@@ -589,7 +639,7 @@ dev.off()
 ```
 
 ## LC-MS heatmap by mean
-```{r, echo = FALSE, warning=F, message=FALSE}
+```{r, eval = F, echo = FALSE, warning=F, message=FALSE}
 # Load diff information
 fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/Supplementary file 1- GC- LC- ICP-MS summary tables.xlsx - LC-MS summary table.csv", skip = 3) %>% 
   select("Database Annotation", "Significantly more abundant in") %>%
@@ -720,8 +770,29 @@ draw(hm_LC_mean,
 dev.off()
 
 ```
+## export LC_mean
+```{r, echo = FALSE, warning=F, message=FALSE}
 
- ## LC-MS stats (Table 1)
+LC_metab_areas %>%
+  column_to_rownames("Metabolite name") %>% colSums()
+
+#Remove NAT3.1, much lower signal
+
+LC_metab_areas %>%
+  pivot_longer(cols = matches("NAT|CON")) %>%
+  filter(name != "NAT3.1") %>%
+  group_by(name_orig=`Metabolite name`) %>%
+  summarise(
+    mean=mean(value),
+    sd=sd(value)
+  ) %>% arrange(desc(mean)) %>% add_column(type="LC") -> lc_mean
+
+fwrite(lc_mean, 
+      "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/LC_means.csv")
+
+```
+
+## LC-MS stats (Table 1)
 ```{r, echo = FALSE, warning=F, message=FALSE}
 #Metabolites stats
 # Percentile by intensity
@@ -755,7 +826,6 @@ LC_area_count_nice[,c(1,3,4)] %>% fwrite(file = "~/rstudio-server/nvme_4tb/ricca
 # GC-MS
 ##Import and tidy bysample dataset
 ```{r, echo = FALSE, warning=F, message=FALSE}
-
 read_excel("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaB/BoschettonaGC_riccardo_21jan25.xlsx", sheet = 2) %>%
   dplyr::select("Metabolite name", matches("ART|NAT"))-> GC_metab_areas
 colnames(GC_metab_areas) %<>% str_replace("ART", "CON") %>% str_replace(" ", "") %>% str_remove("G") #fix sample names
@@ -812,8 +882,7 @@ metab_ids_curated_names %>%
 # Summarise signal area by class
 GC_metab_areas_mat %>% rowMeans->rmeans
 data.frame(Metabolite = names(rmeans),
-           mean_area = rmeans
-                                 )-> GC_metab_avg_area
+           mean_area = rmeans)-> GC_metab_avg_area
 
 ## Merge with annotation and filter out GC annotations
 merge(metab_ids_curated_names, GC_metab_avg_area, by="Metabolite") %>%
@@ -821,8 +890,19 @@ merge(metab_ids_curated_names, GC_metab_avg_area, by="Metabolite") %>%
 
 ```
 
-## Visual summary: heatmap by sample
+## GC_mean
 ```{r, echo = FALSE, warning=F, message=FALSE}
+GC_metab_areas %>%
+  pivot_longer(cols = matches("NAT|CON")) %>%
+  group_by(Metabolitename) %>%
+  summarise(
+    mean=mean(value),
+    sd=sd(value)
+  ) %>% arrange(desc(mean)) -> gc_mean
+```
+
+## Visual summary: heatmap by sample
+```{r, echo = FALSE, warning=F, message=FALSE, eval = F}
 min_fontsize=4
 # Set molecular classes as row annotation, sort by size of the category
 lev<-metab_ids_curated_names_df[rownames(GC_metab_areas_mat),"Subclass"] %>%
@@ -916,7 +996,7 @@ dev.off()
 ```
 
 ## GC-MS heatmap mean
-```{r, echo = FALSE, warning=F, message=FALSE}
+```{r, echo = FALSE, warning=F, message=FALSE, eval=F}
 min_fontsize=4
 # Set molecular classes as row annotation, sort by size of the category
 lev<-metab_ids_curated_names_df[rownames(GC_metab_areas_mat),"Subclass"] %>%
@@ -1065,6 +1145,23 @@ GC_metab_avg_area_1 %>%
   mutate(prop=sum/sum(GC_metab_avg_area_1$mean_area)*100) %>% view
 
 ```
+
+## export GC_mean
+```{r, echo = FALSE, warning=F, message=FALSE}
+
+GC_metab_areas %>%
+  pivot_longer(cols = matches("NAT|CON")) %>%
+  group_by(name_orig=Metabolitename) %>%
+  summarise(
+    mean=mean(value),
+    sd=sd(value)
+  ) %>% arrange(desc(mean)) %>% add_column(type="GC") -> gc_mean
+
+fwrite(gc_mean, 
+      "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/GC_means.csv")
+```
+
+
 #---
 # ICP-MS
 ## Tidy dataset
@@ -1074,6 +1171,19 @@ names(icp)[1]="Element"
 colnames(icp) %<>% str_replace("ART", "CON") %>% 
       str_replace("_", "") #fix sample names
 
+elements <- c(
+  "Li", "Be", "B", "Na", "Mg", "Al", "P", "S", "K", "Ca",
+  "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "As",
+  "Se", "Rb", "Sr", "Zr", "Mo", "Pd", "Ba", "La", "Ce", "Pr", "Nd",
+  "Sm", "Gd", "Tb", "Pb", "Th", "U"
+)
+
+elements <- c(
+  "Na", "Mg", "Al", "P", "S", "K", "Ca",
+  "Mn", "Fe", "Cu", "Zn", "Tb"
+)
+
+
 icp %>% pivot_longer(
   cols=matches("CON|NAT"),
   names_to = "Sample",
@@ -1082,7 +1192,16 @@ icp %>% pivot_longer(
   mutate(
     Group=
       str_extract(Sample, "CON|NAT") %>% 
-      factor(levels = c("CON", "NAT"), labels= c("Constructed", "Natural")))-> icp_l
+      factor(levels = c("CON", "NAT"), labels= c("Constructed", "Natural"))) %>%
+  filter(Element %in% elements)-> icp_l
+```
+## ICP mean
+```{r, echo = FALSE, warning=F, message=FALSE}
+icp_l %>%
+  group_by(Element) %>%
+  summarise(mean=mean(ppm),
+            sd=sd(ppm)
+            ) %>% arrange(desc(mean)) -> icp_mean
 ```
 
 ## Check distribution and T-test
@@ -1150,9 +1269,368 @@ mSet<-Normalization(mSet,
 mSet$dataSet$norm %>% t-> ICP_mat_norm
 ```
 
+# ICP: Boxplots
+```{r, eval=T, echo = FALSE, warning=F, message=FALSE}
+icp_l %>%
+  group_by(Element) %>%
+  summarise(mean=mean(ppm)) %>%
+  arrange(desc(mean)) %>% pull(Element)-> sorted
+
+element_group <- c(
+  # Alkali metals
+  "Na" = "Alkali metals",       "K"  = "Alkali metals",
+  "Li" = "Alkali metals",       "Rb" = "Alkali metals",
+  "Cs" = "Alkali metals",
+
+  # Alkaline earth metals
+  "Ca" = "Alkaline earth metals", "Mg" = "Alkaline earth metals",
+  "Sr" = "Alkaline earth metals", "Ba" = "Alkaline earth metals",
+  "Be" = "Alkaline earth metals",
+
+  # Transition metals
+  "Ti" = "Transition metals", "Zr" = "Transition metals", "Hf" = "Transition metals",
+  "V"  = "Transition metals", "Nb" = "Transition metals", "Ta" = "Transition metals",
+  "Cr" = "Transition metals", "Mo" = "Transition metals", "W"  = "Transition metals",
+  "Mn" = "Transition metals", "Re" = "Transition metals",
+  "Fe" = "Transition metals", "Ru" = "Transition metals",
+  "Co" = "Transition metals", "Rh" = "Transition metals", "Ir" = "Transition metals",
+  "Ni" = "Transition metals", "Pd" = "Transition metals", "Pt" = "Transition metals",
+  "Cu" = "Transition metals", "Ag" = "Transition metals", "Au" = "Transition metals",
+  "Zn" = "Transition metals", "Cd" = "Transition metals",
+
+  # Metalloids & post-transition metals (Boron–Carbon–Pnictogen groups)
+  "B"  = "Metalloids",       "Si" = "Metalloids",
+  "As" = "Metalloids",       "Te" = "Metalloids",
+  "Sb" = "Metalloids",
+  "Al" = "Post-transition metals", "Ga" = "Post-transition metals",
+  "Tl" = "Post-transition metals", "Sn" = "Post-transition metals",
+  "Pb" = "Post-transition metals", "Bi" = "Post-transition metals",
+
+  # Nonmetals
+  "P"  = "Nonmetals",  "S"  = "Nonmetals",  "Se" = "Nonmetals",
+
+  # Halogens
+  "I"  = "Halogens",   "Br" = "Halogens",
+
+  # Lanthanides
+  "La" = "Lanthanides", "Ce" = "Lanthanides", "Pr" = "Lanthanides",
+  "Nd" = "Lanthanides", "Sm" = "Lanthanides", "Eu" = "Lanthanides",
+  "Gd" = "Lanthanides", "Tb" = "Lanthanides", "Dy" = "Lanthanides",
+  "Ho" = "Lanthanides", "Er" = "Lanthanides", "Tm" = "Lanthanides",
+  "Yb" = "Lanthanides", "Lu" = "Lanthanides",
+
+  # Actinides
+  "U"  = "Actinides"
+)
+
+
+icp_l %>%
+  left_join(
+  data.table(
+    Element=names(element_group),
+    Element_Group = element_group
+    )) %>%
+    mutate(Element = factor(Element, levels = sorted)) %>% data.table-> icp_l1
+```
+
+# --
+## Collect plots
+## Visual summary: boxplots
+```{r, echo = FALSE, warning=F, message=FALSE}
+library(ggh4x)
+options(scipen =-1) # strongly prefer scientific notation
+fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/metabolite_classes.csv") %>% dplyr::rename(Class=hmdb_class, 
+       Metabolite=metabolite) %>%
+  mutate(Class = str_remove(Class, "carbohydrate |, peptides,"))-> metab_ids_curated_names2
+
+metab_ids_curated_names2$Class %>% unique()
+
+c("Amino acids & analogues","Nucleosides & nucleotides",
+  "Carbohydrates & conjugates","Carboxylic acids",
+  "Lipids & Fatty Acyls", "Alkaloids & N-heterocycles",
+  "Alcohols & polyols", "Organosulfur compounds"
+  )->sorted_m_cls
+
+
+metab_class_cols<-hcl.colors(
+  n=length(sorted_m_cls),
+  palette = "Set3",rev = T, alpha = 0.5)
+names(metab_class_cols)=sorted_m_cls
+strip <- strip_themed(background_x = elem_list_rect(fill = alpha("darkgreen", 0.3)))
+
+
+c("Amino acids & analogues","Nucleosides & nucleotides"
+  )->sorted_m_cls1
+
+c(
+  "Carbohydrates & conjugates","Carboxylic acids",
+  "Lipids & Fatty Acyls", "Alkaloids & N-heterocycles",
+  "Alcohols & polyols", "Organosulfur compounds"
+  )->sorted_m_cls2
+
+# L-valine cutoff value
+lc_mean %>% filter(mean>9037545) %>%
+  left_join(select(LC_metab_areas2, name_orig, Metabolite)) %>%
+  pull(Metabolite) -> above_valine
+
+lc_mean %>% filter(mean<=9037545) %>%
+  left_join(select(LC_metab_areas2, name_orig, Metabolite)) %>%
+  pull(Metabolite) -> below_valine
+
+lc_mean %>% filter(mean>3324084.4) %>%
+  left_join(select(LC_metab_areas2, name_orig, Metabolite)) %>%
+  pull(Metabolite) -> above_inosine
+
+lc_mean %>% filter(mean<=3324084.4) %>%
+  left_join(select(LC_metab_areas2, name_orig, Metabolite)) %>%
+  pull(Metabolite) -> below_inosine
+
+plot_subclasses<-c(
+                    "Amino acids & analogues 1",
+                    "Nucleosides & nucleotides 1",
+                    "Amino acids & analogues 2",
+                    "Nucleosides & nucleotides 2"
+                      )
+corrected_classes<-c(
+    "Carbohydrates & conj.","Carboxylic acids",
+    "Lipids & Fatty Acyls", "Alkaloids & heterocycles",
+    "Alcohols & polyols", "Organosulphurs"
+                     )
+
+
+LC_metab_areas2 %>%
+  left_join(metab_ids_curated_names2) %>%
+  mutate(Metabolite = 
+           case_when(Metabolite == "Uridine diphosphate-N-acetylgalactosamine" ~  "UDP-N-acetylgalactosamine", .default = Metabolite),
+         Class=case_when(
+           Metabolite %in% above_valine & 
+             Class == sorted_m_cls1[1] ~ "Amino acids & analogues 1",
+         .default = Class),
+         
+         Class=case_when(
+           Metabolite %in% below_valine & 
+             Class == sorted_m_cls1[1] ~ "Amino acids & analogues 2",
+         .default = Class),
+         
+         Class=case_when(
+           Metabolite %in% above_inosine & 
+             Class == sorted_m_cls1[2] ~ "Nucleosides & nucleotides 1",
+         .default = Class),
+         
+         Class=case_when(
+           Metabolite %in% below_inosine & 
+             Class == sorted_m_cls1[2] ~ "Nucleosides & nucleotides 2",
+         .default = Class)
+         ) %>%
+  pivot_longer(cols=contains(c("NAT","CON"))) %>%
+  mutate(Class=factor(Class, level=plot_subclasses)) %>%
+  filter(Class %in% plot_subclasses) %>%
+  ggplot(aes(x=value,y=reorder(Metabolite, value))) +
+  geom_boxplot(outliers = F) +
+  geom_jitter(size=0.5) +
+  facet_wrap2(~Class, scales = "free", ncol = 2, strip=strip) +
+  #facet_wrap(~Class, scales = "free", ncol = 2) +
+  #force_panelsizes(rows = c(2, 1, 1, 0.2)) +
+  force_panelsizes(rows = c(2, 2, 2, 2)) +
+  theme_bw() +
+  theme(axis.text.y=element_text(size = 15),
+        axis.text.x=element_text(angle = 45, hjust = 1),
+        strip.text =element_text(face = "bold", size = 18)) +
+  ylab("") + xlab("") -> p1
+
+LC_metab_areas2 %>%
+  left_join(metab_ids_curated_names2) %>%
+  mutate(
+         
+         Class=case_when(
+           Class == sorted_m_cls2[1] ~ "Carbohydrates & conj.",
+         .default = Class),
+         
+         Class=case_when(
+           Class == sorted_m_cls2[4] ~ "Alkaloids & heterocycles",
+         .default = Class),
+         
+         Class=case_when(
+           Class == sorted_m_cls2[6] ~ "Organosulphurs",
+         .default = Class)
+         
+         
+         ) %>%
+  pivot_longer(cols=contains(c("NAT","CON"))) %>%
+  
+  mutate(Class=factor(Class,
+                      level=c(corrected_classes))) %>%
+  filter(Class %in% c(corrected_classes)) %>%
+  ggplot(aes(x=value,y=reorder(Metabolite, value))) +
+  geom_boxplot(outliers = F) +
+  geom_jitter(size=0.5) +
+  facet_wrap2(~Class, scales = "free", ncol = 2, strip=strip) +
+  force_panelsizes(rows = c(2, 1, 1, 0.2)) +
+  theme_bw() +
+  theme(axis.text.y=element_text(size = 15),
+        axis.text.x=element_text(angle = 45, hjust = 1),
+        strip.text =element_text(face = "bold", size = 18)) +
+    ylab("") + xlab("Peak Area") +
+  scale_x_continuous(
+    labels = function(x) formatC(x, format = "e", digits = 1))-> p2
+
+metab_ids_curated_names2$Class %>% unique()
+
+c("Lipids & Fatty Acyls","Aromatic compounds",
+  "Hydrocarbons", "Organosulphurs")->sorted_m_cls3
+
+strip <- strip_themed(background_x = elem_list_rect(fill = alpha("sandybrown", 0.3)))
+GC_metab_areas2 %>%
+  left_join(metab_ids_curated_names2) %>%
+  
+    mutate(
+         
+         Class=case_when(
+           Class == sorted_m_cls2[6] ~ "Organosulphurs",
+         .default = Class)
+         
+         ) %>%
+  
+  pivot_longer(cols=contains(c("NAT","CON"))) %>%
+  mutate(Class=factor(Class, level=sorted_m_cls3)) %>%
+  ggplot(aes(x=value,y=reorder(Metabolite, value))) +
+  geom_boxplot(outliers = F) +
+  geom_jitter(size=1) +
+  facet_wrap2(~Class, scales = "free", ncol = 4, strip=strip) +
+  force_panelsizes(rows = c(0.5)) +
+  theme_bw() +
+  theme(axis.text.y=element_text(size = 15),
+        axis.text.x=element_text(angle = 45, hjust = 1),
+        strip.text =element_text(face = "bold", size = 18),
+        axis.title.x = element_text(size=15)
+        ) +
+      ylab("") + xlab("Peak Area") +
+  scale_x_continuous(
+    labels = function(x) formatC(x, format = "e", digits = 1))-> p3
+
+
+# ICP
+icp_l1$Element_Group %>% unique->element_groups
+
+hcl.colors(n = length(element_groups), palette = "Earth") ->unified_colors
+qualitative_hcl(length(element_groups))->unified_colors
+
+unified_colors <- c(
+  "Alkali metals"         = "#F8766D",
+  "Alkaline earth metals" = "#7CAE00",
+  "Lanthanides"           = "#CD9600",
+  "Nonmetals"             = "#00BFC4",
+  "Post-transition metals"= "#00A9FF",
+  "Transition metals"     = "#C77CFF"
+)
+names(unified_colors) = element_groups
+
+
+icp_l1$Element_Group1 = factor(icp_l1$Element_Group, levels=element_groups)
+
+
+ggplot(icp_l1[Element %in% c("Na", "Ca", "Mg","Fe","S", "Al" )], aes(x=Element, y=ppm)) + 
+  geom_boxplot(outliers = F) +
+  geom_jitter(size=1, aes(color = Element_Group1)) + 
+    theme_bw() +
+  scale_color_manual(values = unified_colors, drop = F)+
+  ylab("mg/Kg")+ xlab("")+
+  ggtitle("ICP-MS") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size=15),
+        axis.title.y = element_text(size=15),
+        plot.title = element_text(size=18, face = "bold")
+        ) -> p4
+
+ggplot(icp_l1[Element %in% c("K", "P", "Tb","Mn","Zn")], aes(x=Element, y=ppm)) + 
+  geom_boxplot(outliers = F) +
+  geom_jitter(size=1, aes(color = Element_Group1)) + 
+    theme_bw() +
+  scale_color_manual(values = unified_colors, drop = F) +
+  ylab("") + xlab("")+
+    ggtitle("ICP-MS") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size=15),
+        plot.title = element_text(size=18, face = "bold")
+        ) +
+  scale_y_continuous(
+    labels = function(x) formatC(x, format = "e", digits = 1)) + 
+  ggtitle("ICP-MS")-> p5
+
+
+
+legend_plot <- ggplot(icp_l1, aes(x = Element, y = ppm, color = Element_Group1)) +
+  geom_point() +
+  scale_color_manual(values = unified_colors, name = "Element Group") +
+  theme_bw() +
+  ylab("") +
+  theme(legend.position = "bottom",
+        text=element_text(size=15),
+        legend.title = element_text(face = "bold")) +
+  guides(color = guide_legend(
+    ncol = 3,
+    nrow = 2,
+    override.aes = list(size = 10)  # increase point size in legend
+  ))
+
+# Extract just the legend
+custom_legend <- get_legend(legend_plot)
+
+
+wrap_elements(custom_legend) + ggplot() + theme_void() + 
+  p4 + p5 + gg_chn + gg_gran +
+  plot_layout(widths = c(0.5, 0.3, 2, 2, 2, 2), nrow = 1) -> icp;icp
+
+(p4 + p5) / (wrap_elements(custom_legend)) + 
+  plot_layout(widths = c(1,1,1), heights = c(1,1,0.5)) -> icp
+
+gg_gran + gg_chn + icp +
+   plot_layout(widths = c(1,1,1), heights = c(1,1,2))
+
+
+require(patchwork)
+
+gg_fill<-ggplot() + theme_void()
+
+((gg_gran + gg_chn + p4 + p5) +
+  plot_layout(nrow = 1)) /
+  (gg_fill  + (wrap_elements(custom_legend))) +
+  plot_layout(widths = c(1, 1), heights = c(1, 0.1)) +
+  theme(plot.margin = margin(t = 0, b = -0, l = 2, r = 2)) -> first_row
+
+((gg_gran + gg_chn + p4 + p5) +
+   plot_layout(nrow = 1)) / 
+  wrap_elements(custom_legend) +
+   plot_layout(heights = c(10, 1)) -> first_row;first_row
+
+ #lc_ms<-wrap_elements(p1/p1.1) +
+#  theme(plot.margin = margin(t = -10, b = -10, l = -10, r = -10))
+
+p1 + p2  + plot_layout(ncol = 2)-> lc_ms1
+
+  (
+  first_row
+    /
+  lc_ms1
+    / 
+   p3 
+  ) +
+  plot_layout(heights = c(0.5, 0.2, 1.8, 0.4),#c(2, 0.5, 0.5, 0.01),
+              ) -> p
+
+
+ggsave(p,
+       filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/boxplot_lcms.png", dpi = 600, width = 32, height = 25, units = "in", scale = 0.85
+       )
+file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/boxplot_lcms.png")
+  
+
+```
+
+
 
 ## Visual summary: heatmap
-```{r, echo = FALSE, warning=F, message=FALSE}
+```{r, eval=F, echo = FALSE, warning=F, message=FALSE}
 require(ComplexHeatmap)
 min_fontsize=4
 icp %>% column_to_rownames("Element") %>% as.matrix -> icp_m
@@ -1217,34 +1695,20 @@ draw(hm_icp, heatmap_legend_side = "bottom")
 dev.off()
 ```
 
-## Visual summary: boxplots
+## Rank metabolites by abundance (quantile)
 ```{r, echo = FALSE, warning=F, message=FALSE}
-icp_l %>% filter(ppm>=1) %>% pull(Element) %>% unique -> oneppm
-
-ggplot(icp_l %>% filter(Element %in% oneppm)) + 
-  geom_boxplot(aes(y=reorder(Element, ppm), x = log(ppm), color = Group)) +
-
-    geom_text(data=icp_summary %>% filter(Element %in% oneppm),
-              aes(y=Element, x=log(mean_ppm) + 1, label = sig_sym, vjust = 0.7),
-              size = 3,fontface = "bold", color = "black") +
-    scale_color_manual(values = saltmarsh_colors) +
-    theme_minimal() +
-    theme(axis.text = element_text(size = 15)) +
-    ylab("Element") +
-    xlab("Concentration [log(ppm)]") -> gg_icp_box
-
-ggsave(plot = gg_icp_box, 
-       "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/figures/icp_boxplot.png",
-       width = 6,
-       height = 10,
-       dpi = 600, bg = "white"
-       )
+lc_mean %>%
+  mutate(quant = ntile(mean, 4),
+         perc = ntile(mean, 100)
+         ) -> lc_mean_quant
 
 ```
-
 # ----
 ## SUPPLEMENTARY 3: Export GC-, LC-, ICP- MS data
 ```{r, echo = FALSE, warning=F, message=FALSE}
+require(openxlsx)
+rbind(lc_mean, gc_mean) %>% rename(name_orig = `Metabolite name`) -> ms_mean
+
 rbind(
 LC_metab_ids %>% 
   dplyr::select(`Metabolite name`, `Area media`, data_type) %>% 
@@ -1252,31 +1716,33 @@ LC_metab_ids %>%
 GC_metab_ids %>% dplyr::select(`Metabolite name`, media, data_type),
 by= "Metabolite name") -> LC_GC_names_area
 
+
+
 LC_GC_names_area %<>% dplyr::rename(name_orig=`Metabolite name`)
 
-merge(metab_ids_curated, LC_GC_names_area) %>%
-  dplyr::select(name_orig, Metabolite, HMDB, KEGG, Subclass, media, data_type) %>%
+merge(metab_ids_curated, ms_mean) %>%
+  dplyr::select(name_orig, Metabolite, HMDB, KEGG, Subclass, mean, sd, type) %>%
   dplyr::rename(
     "Annotation" = name_orig,
     "Database Annotation" = Metabolite,
     "HMDB ID" = HMDB,
     "KEGG ID" = KEGG,
     "Molecular Subclass" = Subclass,
-    "Average Signal Intensity"= media
+    "Average Signal Intensity"= mean,
+    "Standard deviation"= sd
   ) -> LC_GC_names_area2
 
-LC_GC_names_area2 %>% filter(data_type == "LC") -> LC_names_area2
-LC_GC_names_area2 %>% filter(data_type == "GC") -> GC_names_area2
+LC_GC_names_area2 %>% filter(type == "LC") -> LC_names_area2
+LC_GC_names_area2 %>% filter(type == "GC") -> GC_names_area2
 
-
-icp_summary %>%
-  dplyr::select(Element, Constructed, Natural, sig_sym) %>%
-  dplyr::rename(
-    "Abundance in Constructed (ppm)" = Constructed,
-    "Abundance in Natural (ppm)" = Natural,
-    "Significant difference" = sig_sym) -> icp_summary2
 
 wb <- createWorkbook()
+addWorksheet(wb, "Granulometry")
+writeData(wb, "Granulometry", x = gran_mean)
+
+addWorksheet(wb, "CHNS")
+writeData(wb, "CHNS", x = chn_mean)
+
 addWorksheet(wb, "LC-MS summary table")
 writeData(wb, "LC-MS summary table", x = LC_names_area2)
 
@@ -1284,9 +1750,9 @@ addWorksheet(wb, "GC-MS summary table")
 writeData(wb, "GC-MS summary table", GC_names_area2)
 
 addWorksheet(wb, "ICP-MS summary table")
-writeData(wb, "ICP-MS summary table", icp_summary2)
+writeData(wb, "ICP-MS summary table", icp_mean)
 
 saveWorkbook(wb,
-             "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/Supplementary Table 3 - GC- LC- ICP-MS summary tables.xlsx",
+             "/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/final/supplementary/Supplementary File 2 - Abiotic parameters.xlsx",
              overwrite = TRUE)
 ```
