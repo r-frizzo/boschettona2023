@@ -2,8 +2,8 @@
 # boschettona2023
 
 This repository contains the R Scripts and Genome-scale metabolic models (GEMs) used to analyse the data from the paper 
-"Metabolites and flux modelling reveal viral modulation of carbohydrates, carboxylates, and nucleotide-sugars in salt marsh sediments".
-Raw sequencing reads are available at NCBI (PRJNA1226540).
+Viral lysis and host reprogramming impact carbohydrate, amino acid, and osmolyte cycling in salt marsh tidal creek sediments".
+Sequencing reads are available at NCBI (PRJNA1226540).
 
 ## Scripts
 
@@ -20,4 +20,4 @@ Processing, analysis and visualisation of MAG and vOTUs taxonomy and relative ab
 Analysis of GEMs and integration with metagenomics, viromics, and metabolomics data
 
 ## GEMs available at: https://figshare.com/s/a9e23bab7e9995b3fd7b
-  Compressed archives containing all Genome-scale metabolic models analysed in the manuscript, in .xml and .RDS format.
+  Compressed archives containing all Genome-scale metabolic models analysed in the manuscript, in .RDS format.
