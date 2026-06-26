@@ -1,7 +1,7 @@
 ---
 title: "bosc23_metab_fba"
 author: "Riccardo Frizzo"
-date: "2025-10-13"
+date: "2026-26-06"
 output: pdf_document
 editor_options: 
   chunk_output_type: console
@@ -10,217 +10,9 @@ editor_options:
 #Init
 ## Packages
 ```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-require(cobrar); require(tidyverse); require(data.table); require(foreach); library(parallel); require(magrittr); require(ggpubr); require(vegan); require(caret);library(ggrepel);require(DT);require(rstatix)
+require(cobrar); require(tidyverse); require(data.table); require(foreach); library(parallel); require(magrittr); require(ggpubr); require(vegan); require(caret);library(ggrepel);require(DT);require(rstatix); require(patchwork);require(scales)
 ```
-## Functions
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-plot_pca<-function(pca, top_n=30,
-                   plot_title = "",
-                   size_var="mean_mag_abund",
-                   fill_var="Phylum",
-                   arrow_scale=8,
-                   metadata=gem_analysis,
-                   limits=4
-                   ){
-OTUs<-rownames(pca$x)
-pca_res<-pca
-scores <- as.data.frame(pca_res$x)
-loadings <- as.data.frame(pca_res$rotation)
-metadata<-merge(gem_analysis, metadata, by="OTU")
 
-# --- Identify top contributors to PC1 & PC2 ---
-loadings$feature <- rownames(loadings)
-loadings <- loadings %>%
-  mutate(contrib = abs(PC1) + abs(PC2)) %>%
-  arrange(desc(contrib))
-
-top_loadings <- loadings[1:top_n, ]
-
-# --- Scale arrows for plotting ---
-  # adjust this factor to control arrow length
-top_loadings <- top_loadings %>%
-  mutate(PC1 = PC1 * arrow_scale,
-         PC2 = PC2 * arrow_scale)
-
-# Additional plotting variables
-if(!is.na(size_var)){scores$size=metadata[OTU%in% OTUs,get(size_var)]}else{scores$size=NULL}
-if(!is.na(fill_var)){scores$fill=metadata[OTU%in% OTUs,get(fill_var)]}else{scores$fill=NULL}
-
-
-# --- Plot ---
-ggplot(scores, aes(x=PC1, y=PC2)) +
-  geom_point(alpha = 0.8,
-             shape = 21,
-             color="black",
-             aes(fill=fill,
-                 size=size,
-                 )) +
-  #scale_color_manual(values=c("black", "green")) +
-  scale_fill_manual(values=tree_colors) +
-  geom_segment(
-    data = top_loadings %>%
-               mutate(PC1=PC1*0.9,
-                      PC2=PC2*0.9),
-    aes(x = 0, y = 0, xend = PC1, yend = PC2),
-    arrow = arrow(length = unit(0.25, "cm")),
-    color = "black",
-    linewidth = 0.1
-  ) +
-  theme_minimal(base_size = 14) +
-  theme(legend.position = "none") +
-  labs(
-    title = plot_title,
-    x = paste0("PC1 (", round(100 * (pca_res$sdev[1]^2 / sum(pca_res$sdev^2)), 1), "%)"),
-    y = paste0("PC2 (", round(100 * (pca_res$sdev[2]^2 / sum(pca_res$sdev^2)), 1), "%)")
-  ) + 
-  geom_text_repel(data = top_loadings, aes(x = PC1, y = PC2, label = feature),
-          hjust = 1.1, vjust = 1.1, color = "black", size = 2.5, fontface = "bold", force = 1.5 ) +
-  geom_point(data = top_loadings,
-             aes(x = PC1, y = PC2, label = feature)) +
-    
-  xlim(-limits,limits) + ylim(-limits,limits)->p;p
-#plotly::ggplotly(p) -> pi;pi
-}
-rm(scores)
-
-##############################
-
-plot_metab_PCA<-
-  function(
-  pca_data=pca_exhanges_aero,
-  met="Trehalose",
-  pca_exchanges=fba_ex){
-scores<-pca_data$x %>% data.frame %>% rownames_to_column("OTU") %>% data.table
-scores[,hl:=OTU %in% pca_exchanges[name %in% met, OTU]]
-scores$flux=0
-scores[OTU %in% fba_ex[name %in% met, OTU]]$flux = 
-  abs(fba_ex[name %in% met, fba_flux]) %>% as.numeric
-scores$abund=mag_analysis[OTU %in% scores$OTU]$mean_mag_abund
-
-ggplot(scores, aes(x=PC1, y=PC2, fill=flux)) +
-  geom_point(shape=21,aes(size=abund), alpha=0.8) + 
-  scale_fill_gradient(high = "red", low = "white") +
-  theme_minimal() + 
-  theme(legend.position = "none") +
-  ggtitle(paste(met,collapse = ";"))
-  }
-################################################
-find_metab_react<-function(met_id, reactions){
-df<-reactions
-df$OTU %>% unique %>% length->ngems
-df[grepl(met_id, compound_ids)]-> selected_react
-print(ngems)
-
-# Classify metabolite utilisation
-selected_react %>%
-  mutate(
-    utilisation=
-      case_when(
-      ((grepl(paste0(met_id,".*="), equation) & fba_flux>0)|
-      (grepl(paste0("=.*", met_id), equation) & fba_flux<0)) &
-      !(grepl(paste0(met_id, ".*=.*", met_id), equation)) ~ "consumed",
-      
-      ((grepl(paste0(met_id,".*="), equation) & fba_flux<0)|
-      (grepl(paste0("=.*", met_id), equation) & fba_flux>0)) &
-      !(grepl(paste0(met_id, ".*=.*", met_id), equation)) ~ "produced",
-      
-      (grepl(paste0(met_id, ".*=.*", met_id), equation)) ~ "transported"
-      )
-    ) %>%
-  dplyr::select(OTU,react_id, react_name, utilisation, definition,
-         fba_flux, red_costs) -> selected_react1
-
-selected_react1 %>%
-  group_by(utilisation, react_id, react_name, definition) %>% 
-  summarise(
-    median_c_flux=median(fba_flux[utilisation=="consumed"]) %>% round(3),
-    median_p_flux=median(fba_flux[utilisation=="produced"]) %>% round(3),
-    median_t_flux=median(fba_flux[utilisation=="transported"]) %>% round(3),
-    prop_gems=round((n()/ngems)*100,3) ,
-    n_gems=n()
-  ) %>% add_column(metabolite=key_metabolites[id==met_id, name],
-                   .before="utilisation") %>%
-  left_join(sbs_react)
-}
-
-met_report<-
-  function(selected_mets=NA,
-         exchange_subset=NA,
-         react_subset=NA,
-         utilisation_type=c("consumed", "produced", "transported"),
-         ko_data=NA,
-         fisher_use_type)
-    {
-    # For each metabolite, extract linked reactions and related info
-    # from the provided rection dataset
-    foreach(met_id = selected_mets$id)%do%{
-      #exchange_subset[id==met_id]->sel
-      find_metab_react(met_id=met_id,reactions = react_subset) %>% 
-        arrange(prop_gems) %>% 
-        filter(utilisation %in% utilisation_type) %>%
-        ungroup
-    } %>% rbindlist()  %>% arrange(n_gems) -> react_summary
-    
-    react_summary %>%
-      left_join(sbs_react) -> react_summary
-
-
-  
-  
-  react_subset$OTU %>% unique %>% length->ngems  
-  ko_data %>%
-    dplyr::rename(react_id=ko_metab) %>%
-    mutate(react_id2=str_remove_all(react_id, "EX_|_c0|_e0")) %>%
-    filter(react_id2 %in% selected_mets$id) %>%
-    group_by(name, react_id) %>%
-    summarise(
-    median_biomass1=median(biomass_free) %>% round(3),
-    mean_biomass_decrease=mean(delta_prop) %>% round(3),
-    n_ko_gems=n()
-  ) %>% arrange(ngems)-> ko_summary
-  
-  left_join(ko_summary, select(fisher_use_type, -p_value))-> ko_fish_summary
-  
-  
-  left_join(
-    selected_mets[,c("react_id", "name","median","n", "prop")],
-    ko_fish_summary
-        ) %>%
-    mutate(prop_ko_gems=(100*(n_ko_gems/n)) %>% round(2),
-           p_adj = formatC(p_adj, format = "e", digits = 1)) %>%
-    
-    dplyr::select(name, median, n, prop, prop_ko_gems,
-                  mean_biomass_decrease, subs_prop, prod_prop) %>%
-    
-    dplyr::rename(
-           "Metabolite name"= name,
-           "Median FBA flux"=median,
-           "Used by GEMs"=n,
-           "Used by GEMs (%)"=prop,
-           "GEMs limited (%)"= prop_ko_gems,
-           "Mean biomass decrease"=mean_biomass_decrease,
-           "Used as substrate (%)" = subs_prop,
-           "Used as product (%)" = prod_prop
-           )-> ko_fish_summary2
-  list("react_summary"=react_summary,
-       "ko_fish_summary"=ko_fish_summary2
-       )->> res
-  list("react_summary"=react_summary,
-       "ko_fish_summary"=ko_fish_summary2
-       ) %>% lapply(datatable)
-  }
-
-########################
-react_check<-function(met="H2S"){
-tidy_reactions[
-  grepl(key_metabolites[grepl(met, name), id], compound_ids)] %>%
-  group_by(Order, react_name) %>%
-  summarise(median_flux=median(fba_flux) %>% round(5),
-            n=n()) %>% data.table %>%
-    arrange(median_flux)
-  }
-
-```
 ## Variables
 ```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
 qprobs=seq(0,1,0.01)
@@ -373,7 +165,25 @@ cbind(gapseq_pwy_hierarchy, sbs_hier) %>%
 
 ```
 
+# Import MAG analysis and prepare GEM analysis
+```{r, echo = T, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+# Import MAG analysis for taxonomy and other parameters
+mag_analysis<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_analysis_co_de_24sep24.tsv") %>%
+  rowwise %>%
+  mutate(mean_mag_abund=
+           mean(mean_mag_abund_Art, mean_mag_abund_Nat), .before = "mean_mag_abund_Art") %>%
+  data.table %>%
+  mutate(Phylum=str_remove(Phylum, "p__"),
+         Order=str_remove(Order, "o__")
+         )
 
+mag_analysis$Order[mag_analysis$Order==""]="Unknown"
+mag_analysis %>% pull(OTU)->mag_ids
+
+# Make gem_analysis
+gem_analysis <- 
+  mag_analysis[,c("OTU", "Phylum", "Class", "Order", "Family","mean_mag_abund", "virus_presence")]
+```
 
 #----
 # Prepare metaB data
@@ -466,37 +276,129 @@ rm(metab_react_matched, ambiguos, dups)
 
 fwrite(metab_react_matched_cpds, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/metab_react_matched_cpds.csv")
 ```
-## Add average relative signal intensity
-```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
-GC_area<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaB/GC_for_metaboAn_27may25.csv")
-GC_area %>% select(-group) %>%
-  column_to_rownames("sample") %>%
-  reshape2::melt()%>%
-  group_by(variable) %>%
-  summarise(mean=mean(value)) ->gc_avg
 
-gc_avg %<>%
-  mutate(prop=round(mean/sum(gc_avg$mean)*100,3))%>%
-  dplyr::rename(name=variable) %>% filter(!grepl("NA_", name)) %>%
-  arrange(name)
+# Check predicted growth media
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=T}
+list.files("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq", pattern = "-medium.csv", full.names = T) -> medias
 
-LC_area<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaB/LCMS_ALL_MA_26may25.csv")
-LC_area %>% select(-group) %>%
-  column_to_rownames("sample") %>%
-  reshape2::melt() %>%
-  group_by(variable) %>%
-  summarise(mean=mean(value))->lc_avg
+foreach(i=medias)%do%{
+    fread(i) %>%
+      add_column(OTU = str_extract(i, "[:alpha:]+_SemiBin_[:digit:]+"),
+                 .before = "compounds"
+                 )
+} %>% rbindlist() -> all_medias
 
-lc_avg %<>%
-  mutate(prop=(mean/sum(lc_avg$mean)*100) %>% round(3)) %>%
-  dplyr::rename(name=variable) %>% arrange(name)  %>% filter(!grepl("U_", name))
+all_medias %>%
+  select(OTU, compounds, maxFlux) %>%
+  pivot_wider(names_from = compounds, values_from = maxFlux, values_fill = 0) -> all_medias_w
 
-rbind(lc_avg, gc_avg)
 
-metab_react_matched_cpds3<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/metab_react_matched_cpds_rel_avg_abund_v2.csv")
 ```
 
-# Prepare growth medium
+# Prepare growth media
+## Growth medium by GEM
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+min_medium<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq/mean_min_medium_6sep24.csv")
+metabolites<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/metab_react_matched_cpds.csv")
+
+metabolites %>%
+  add_column(maxFlux=1) %>%
+  dplyr::rename(compounds=id) %>%
+  select(name,compounds,maxFlux) %>%
+  unique %>%
+  filter(name != "")-> metab_medium
+
+metab_medium %>%
+  select(compounds, maxFlux) %>%
+  unique %>%
+  pivot_wider(names_from = compounds, values_from = maxFlux, values_fill = 0) -> metab_medium_w
+
+foreach(i = 1:nrow(all_medias_w), .combine = "rbind")%do%{
+  all_medias_w[i,] %>% colnames -> min_med
+  min_metab<-c(min_med, setdiff(metab_medium$compounds, min_med))
+  cbind(all_medias_w[i,], metab_medium_w[1,])[,min_metab]
+} -> min_metab_med_df_w
+
+min_metab_med_df_w %>%
+  reshape2::melt() %>% data.table->min_metab_med_df
+
+colnames(min_metab_med_df) = c("OTU", "compounds", "MaxFlux")
+
+min_metab_med_df %>%
+  left_join(key_metabolites[,c("id", "name")] %>%
+              dplyr::rename(compounds=id)) %>% 
+  select(compounds, MaxFlux, name, OTU)->min_metab_med_df1
+
+dir.create("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq/gapseq_min_metab_maxflux1_bygem_22apr26")
+
+mags<-unique(min_metab_med_df1$OTU)
+for(i in mags){
+  min_metab_med_df1[OTU == i] %>%
+    filter(MaxFlux != 0) %>%
+    select(compounds, name, MaxFlux) %>%
+    fwrite(
+      paste0("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq_min_metab_maxflux1_bygem_22apr26/", i, "-metab-medium.csv")
+    )
+}
+
+
+```
+
+## Growth medium by GEM, gapseq medium
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=T}
+min_medium
+
+gc_mean<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/GC_means.csv")
+
+gc_mean %>% mutate(
+  mean_scaled=rescale(mean,to=c(0.1, 10))) -> gc_mean_scaled
+
+
+lc_mean<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/LC_means.csv")
+lc_mean %>% mutate(
+  mean_scaled=rescale(mean,to=c(0.1,10))) -> lc_mean_scaled
+
+metab_react_matched_cpds<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/metab_react_matched_cpds.csv")
+
+metab_react_matched_cpds %>%
+  left_join(
+    rbind(lc_mean_scaled, gc_mean_scaled),
+    by="name_orig") %>%
+  filter(!is.na(mean_scaled)) %>%
+  mutate(mean_scaled=round(mean_scaled,3))-> metab_react_matched_cpds_mean_scaled #Tryptophan betaine is removed 
+
+#Example:
+"gapseq medium -m ../gapseq/art_SemiBin_423-draft.RDS -p ../gapseq/art_SemiBin_423-all-Pathways.tbl -c cpd00007:0;cpd00159:10"
+
+paste0(
+  metab_react_matched_cpds_mean_scaled$id,
+  ":",
+  metab_react_matched_cpds_mean_scaled$mean_scaled, collapse = ";")
+
+# Copy and paste this string to the gapseq medium command or to a bash env var
+
+# Import the media for the suppplementary
+medium_files<-list.files(path = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq_min_metab_maxflux1_bygem_22apr26/", pattern = "\\d-medium.csv", full.names = T)
+
+foreach(i=medium_files)%do%{
+    fread(i) %>%
+      add_column(MAG = str_extract(i, "[:alpha:]+_SemiBin_[:digit:]+"),
+                 .before = "compounds"
+                 )
+} %>% rbindlist() -> all_medias
+all_medias %>%
+  mutate(name=case_when(name == "" ~ compounds, .default = name)) %>%
+  select(MAG, name, maxFlux) %>% 
+  group_by(MAG,name) %>%
+  summarise(max=max(maxFlux)) %>%
+  pivot_wider(names_from = name, values_from = max) %>% 
+  fwrite("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/metab_medium.csv", sep = "\t", dec = ",")
+
+
+
+
+```
+##Alt: Prepare common growth medium
 ```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
 min_medium<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq/mean_min_medium_6sep24.csv")
 metabolites<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/metab_react_matched_cpds.csv")
@@ -516,35 +418,48 @@ fwrite(min_metab_medium, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschetton
 ```
 Gapfill
 
-#-
-# Import MAG analysis and prepare GEM analysis
+# Check transporters
 ```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
-# Import MAG analysis for taxonomy and other parameters
-mag_analysis<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/data/analysis/mag_analysis_co_de_24sep24.tsv") %>%
-  rowwise %>%
-  mutate(mean_mag_abund=
-           mean(mean_mag_abund_Art, mean_mag_abund_Nat), .before = "mean_mag_abund_Art") %>%
-  data.table %>%
-  mutate(Phylum=str_remove(Phylum, "p__"),
-         Order=str_remove(Order, "o__")
-         )
+list.files("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq", pattern = "-Transporter.tbl", full.names = T) -> trans
 
-mag_analysis$Order[mag_analysis$Order==""]="Unknown"
-mag_analysis %>% pull(OTU)->mag_ids
+foreach(i=trans)%do%{
+    fread(i) %>%
+      add_column(OTU = str_extract(i, "[:alpha:]+_SemiBin_[:digit:]+"),
+                 .before = "id"
+                 )
+} %>% rbindlist() %>% data.table -> all_trans
 
-# Make gem_analysis
-gem_analysis <- 
-  mag_analysis[,c("OTU", "Phylum", "Class", "Order", "Family","mean_mag_abund", "virus_presence")]
+all_trans %>%
+  left_join(gem_analysis[, c("OTU", "Order")]) -> all_trans1
+
+all_trans1 %>%
+  select(OTU, sub) %>%
+  unique %>% add_column(pres=1) %>%
+  pivot_wider(names_from = sub,
+              values_from = pres, values_fill = 0)-> all_trans_w
+
+all_trans_w %>% column_to_rownames("OTU") %>%
+  colSums() %>% sort
+
+all_trans1[grepl("xylan", sub), Order] %>% table %>% sort
+
 ```
+#-
 
 #Import models
 ```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
 #job::job({
 mag_fba_metab <- function(m) {
-  model<-cobrar::readSBMLmod(
-    paste0("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq_metab_27oct25_all_metab10/", m, ".xml"))
+  model<-cobrar::readSybilmod (
+    paste0("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq_min_metab_maxflux1_bygem_22apr26/", m, ".RDS"))
   return(model)
 }
+
+list.files("/home/riccardo/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq_min_metab_maxflux1_bygem_22apr26/", pattern = ".RDS") %>%
+  str_extract("[:alpha:]+_SemiBin_[:digit:]+") -> aval
+mag_ids<-aval
+length(mag_ids)
+
 
 #mag_fba_min <- function(m) {
 #  model<-cobrar::readSBMLmod(
@@ -557,7 +472,7 @@ mag_fba_metab <- function(m) {
 #stopCluster(cl);gc()
 #names(models_min)=mag_ids
 
-cl<-makeCluster(30)
+cl<-makeCluster(25)
 parLapply(cl, mag_ids, mag_fba_metab)->models_metab
 stopCluster(cl);gc()
 names(models_metab)=mag_ids
@@ -570,8 +485,9 @@ names(models_metab)=mag_ids
 #names(models_metab)=mag_ids
 #})
 
-# GEM stats
-models_metab[[1]]
+# GEM check
+#models_metab[["nat_SemiBin_286"]] %>% fba()
+#models_metab[["nat_SemiBin_286"]] %>% fva()
 
 
 ```
@@ -592,11 +508,11 @@ sbs_react %>% mutate(sbs=str_remove(sbs, "subsys_") %>%
 sbs_react1 %>%
   left_join(key_pwy) -> sbs_react
 
-fwrite(sbs_react, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/sbs_react.csv")
+fwrite(sbs_react, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/sbs_react_27apr26.csv")
 ```
 #Prepare sbs react (load)
 ```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-sbs_react<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/sbs_react.csv") %>%
+sbs_react<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/sbs_react_27apr26.csv") %>%
   group_by(react_id) %>%
   summarise(
     sbs_ids=paste(sbs, collapse = "|"),
@@ -615,75 +531,82 @@ tibble(
   gene=mod@genes) %>% rowwise() %>% 
     mutate(gene=paste(unlist(gene), collapse = ";"))
 } %>% rbindlist -> gem_react_genes
-fwrite(gem_react_genes, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/gem_react_genes.csv")
+fwrite(gem_react_genes, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/gem_react_genes_27apr26.csv")
 ```
 
 #Prepare react-gene df (load)
 ```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-gem_react_genes<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/gem_react_genes.csv")
+gem_react_genes<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/gem_react_genes_27apr26.csv")
 ```
 #FBA: Get default reactions and exchanges fluxes
 ## Simulate growth (do)
+
 ```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+length(models_metab[])
+
 # FBA METAB ----
-cl<-makeCluster(20)
+cl<-makeCluster(25)
 doParallel::registerDoParallel(cl)
 
-foreach(mod = models_metab) %dopar% {
-  mod <- cobrar::changeBounds(model = mod, react = "EX_cpd00007_e0", lb = -0.01, ub=0)  #O2
+foreach(mod = models_metab[], .verbose = T) %dopar% {
+  #mod <- cobrar::changeBounds(model = mod, react = "EX_cpd00007_e0", lb = -0.01, ub=0)  #O2
   # Simulate aerobic growth
   cobrar::fba(mod) -> sol
-  tibble::add_column(cobrar::fva(mod), 
-                     OTU=mod@mod_id,
-                     sim_O2=T, .before = "react") -> fva
+  #tibble::add_column(cobrar::fva(mod), 
+  #                   OTU=mod@mod_id,
+  #                   sim_O2=T, .before = "react") -> fva
   
   data.table::data.table(
     OTU = mod@mod_id,
-    sim_O2=T,
+    #sim_O2=T,
     react_id=mod@react_id,
-    fba_flux=sol@fluxes,
-    fva_min=fva$min.flux,
-    fva_max=fva$max.flux,
-    red_costs=sol@redCosts
-  )-> fba_a
+    fba_flux=sol@fluxes
+    #fva_min=fva$min.flux,
+    #fva_max=fva$max.flux,
+    #red_costs=sol@redCosts
+  )-> fba_a;fba_a
 
   
   # Simulate anaerobic growth by setting O2 lower reaction bound to 0
-  mod <- cobrar::changeBounds(model = mod, react = "EX_cpd00007_e0", lb = 0)  #O2
-  cobrar::fba(mod) -> sol
-  tibble::add_column(cobrar::fva(mod), 
-                     OTU=mod@mod_id,
-                     sim_O2=F, .before = "react") -> fva
+#  mod <- cobrar::changeBounds(model = mod, react = "EX_cpd00007_e0", lb = 0)  #O2
+#  cobrar::fba(mod) -> sol
+#  tibble::add_column(cobrar::fva(mod), 
+#                     OTU=mod@mod_id,
+#                     sim_O2=F, .before = "react") -> fva
+#  
+#  data.table::data.table(
+#    OTU = mod@mod_id,
+#    sim_O2=F,
+#    react_id=mod@react_id,
+#    fba_flux=sol@fluxes,
+#    fva_min=fva$min.flux,
+#    fva_max=fva$max.flux,
+#    red_costs=sol@redCosts
+#  )-> fba_an
   
-  data.table::data.table(
-    OTU = mod@mod_id,
-    sim_O2=F,
-    react_id=mod@react_id,
-    fba_flux=sol@fluxes,
-    fva_min=fva$min.flux,
-    fva_max=fva$max.flux,
-    red_costs=sol@redCosts
-  )-> fba_an
-  
-  rbind(fba_a, fba_an)
+#  rbind(fba_a, fba_an)
 } -> fba_comp
 fba_comp %>% rbindlist() -> fba_comp_metab
 
 #fwrite(fba_comp_metab, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/fba_fva_min_gems_20nov25.csv", nThread = 20)
-fwrite(fba_comp_metab, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/fba_fva_metab_gems_2feb26_02-0.01.csv", nThread = 20)
+fwrite(fba_comp_metab, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/fba_fva_metab_maxflux_conc 0.1-10_22apr26.csv")
 stopCluster(cl)
-gc()
-```
 
+gc()
+fba_comp_metab$OTU %>% unique
+```
 ## Simulate growth (load)
 ```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-fba_comp_metab<- fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/fba_fva_metab_gems_27oct25.csv")
+fba_comp_metab<- fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/fba_fva_metab_maxflux_conc 0.1-10_22apr26.csv")
+
+#fba_comp_metab<- fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/fba_fva_metab_gems_27oct25.csv")
 
 #fba_comp_metab<- fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/pfba_fva_metab_gems_02feb25.csv")
 
-```
 
-#Import subsystem/reaction table
+
+```
+#Import subsystem/reaction table (do)
 ```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
 foreach(mod=models_metab)%do%{
   sbs<-mod@subSys %>% as.matrix
@@ -695,8 +618,15 @@ foreach(mod=models_metab)%do%{
 
 sbs_react %>% mutate(sbs=str_remove(sbs, "subsys_") %>%
                        str_replace("_", "-")) -> sbs_react1
+
+fwrite(sbs_react1, "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/sbs_react_27apr26.csv")
+
 ```
 
+#Import subsystem/reaction table (load)
+```{r eval=T, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+sbs_react1<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/sbs_react_27apr26.csv")
+```
 #---
 # Analysis I
 
@@ -744,65 +674,26 @@ family_nmags %>%
 ## Define who is growing with O2 and without (for analysis)
 ```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
 # Check distribution of biomass vector
-fba_comp_metab[react_id=="EX_cpd11416_c0"] %>%
-  filter(sim_O2) %>% pull(fba_flux) %>% sort-> growth_vec_aero
-
-fba_comp_metab[react_id=="EX_cpd11416_c0"] %>%
-  filter(!sim_O2) %>% pull(fba_flux) %>% sort-> growth_vec_anaero
+fba_comp_metab[react_id=="EX_cpd11416_c0"] %>% pull(fba_flux) %>% sort-> growth_vec
 
 qprobs<-seq(0,1,0.01)
-quantile(growth_vec_aero, qprobs)%>% round(10)
-
-qprobs<-seq(0,1,0.01)
-quantile(growth_vec_anaero, qprobs) %>% round(10)
+quantile(growth_vec, qprobs)%>% round(10)
 
 # Look for a big drop (several orders of magnitude) in the quantile distribution
 # 0.1 is a suitable threshold
 
 fba_comp_metab[react_id=="EX_cpd11416_c0"] %>%
-  filter(sim_O2) %>% filter(fba_flux>0.1) -> OTU_aero_df
-OTU_aero_df %>% pull(OTU) -> OTU_aero
+   filter(fba_flux>0.1) -> OTU_growth
 
-gem_analysis[OTU_aero_df[,c("OTU", "fba_flux")],
-             growth_aero := i.fba_flux, on = "OTU"]
-
-fba_comp_metab[react_id=="EX_cpd11416_c0"] %>%
-  filter(!sim_O2) %>% filter(fba_flux>0.1)-> OTU_anaero_df
-OTU_anaero_df %>% pull(OTU) -> OTU_anaero
-
-gem_analysis[OTU_anaero_df[,c("OTU", "fba_flux")],
-             growth_anaero := i.fba_flux, on = "OTU"]
-
-# Define anaerobes
-gem_analysis[,anaerobic:=OTU %in% OTU_anaero]
-gem_analysis %<>%
-  mutate(anaerobic_random=sample(anaerobic))
-
-
-# Create a common growth value
-gem_analysis
-gem_analysis[, growth_value := fcase(growth_aero >= 1.11, growth_aero,
-                               growth_aero < 1.11, growth_aero,
-                               default = NA)]
-gem_analysis %<>%
-  mutate(growth_value=case_when(anaerobic==T ~ growth_anaero, .default = growth_value ))
+gem_analysis[OTU_growth[,c("OTU", "fba_flux")],
+             growth := i.fba_flux, on = "OTU"]
 
 
 ```
-## Effect of O2 blocking in biomass
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
 
-gem_analysis %<>%
-mutate(diff_O2=round(100*(growth_anaero-growth_aero)/growth_aero),2)
-
-gem_analysis[!is.na(diff_O2), diff_O2] %>% sort
-gem_analysis[!is.na(diff_O2) & diff_O2<0, diff_O2] %>% mean
-gem_analysis[!is.na(diff_O2), diff_O2] %>% sd
-
-```
 # Define who is growing fast and slow
 ```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-growth_vec<-gem_analysis$growth_value%>% sort
+growth_vec<-gem_analysis$growth%>% sort
 growth_vec %>% quantile()->growth_quant;growth_quant
 
 #Define threshold at 50%
@@ -810,15 +701,25 @@ growth_threshold<-growth_quant[["50%"]]
 
 
 # Define growth categories
-gem_analysis[, growth_category := fcase(growth_value > growth_threshold, "High",
-                                        growth_value <= growth_threshold, "Low",
+gem_analysis[, growth_category := fcase(growth > growth_threshold, "High",
+                                        growth <= growth_threshold, "Low",
                                         default = NA)]
  
+gem_analysis %>%
+  group_by(Order) %>%
+  summarise(growth_range = paste0(round(min(growth, na.rm = T), 2),"-", round(max(growth, na.rm = T), 2)),
+            growth_median = round(median(growth, na.rm = T),2)
+            )
+
+
+#gem_analysis %>%
+#  ggplot(aes(y=reorder(Order,growth), x=growth)) +
+#  geom_boxplot()
 ```
 
 #---
 # Tidy raw datasets
-## Exchange fluxes
+## Exchange fluxes (products and subs)
 ```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
 # Tidy, add info
 # Filter low fluxes 
@@ -834,13 +735,16 @@ fba_comp_metab %>%
   left_join(
     gem_analysis[, 
                  c("OTU","Phylum", "Class", "Order","Family",
-                   "growth_category", "anaerobic", "anaerobic_random")]) %>%
-  select(OTU, sim_O2, react_id,
-         fba_flux, fva_min, fva_max, red_costs,
+                   "growth_category")]) %>%
+  select(OTU, react_id,
+         #sim_O2,
+         fba_flux,
+         #fva_min, fva_max, red_costs,
          id, name, formula,
          has_C, has_N, has_S, , is_COH, is_COOH, mass, simple_category,
          Phylum, Class, Order, Family,
-         growth_category, anaerobic, anaerobic_random) -> fba_comp_metab1
+         growth_category) -> fba_comp_metab1
+fba_comp_metab1$OTU %>% unique
   #filter(abs(fba_flux)>1e-3)-> fba_comp_metab1 #HERE FLUX FILTERING 
 
 # Fix metaB categories
@@ -869,43 +773,252 @@ fba_comp_metab1 %<>%
 
 # Separate aero and anaero
 
-tidy_exhanges<-
-  rbind(
-  fba_comp_metab1[sim_O2==T & anaerobic==F],
-  fba_comp_metab1[sim_O2==F & anaerobic==T])
+tidy_exhanges<-fba_comp_metab1
+#tidy_exhanges<-
+#  rbind(
+#  fba_comp_metab1[sim_O2==T & anaerobic==F],
+#  fba_comp_metab1[sim_O2==F & anaerobic==T])
+
 
 ## Filter substrates
-fba_comp_metab1 %>%
+tidy_exhanges %>%
   filter(
-    sim_O2,
     fba_flux<0,
-    OTU%in% gem_analysis[anaerobic==F, OTU]
-    ) %>% mutate(fba_flux=-(fba_flux)) -> fba_substrates_aero
-
-fba_comp_metab1 %>%
+    ) %>% mutate(fba_flux=-(fba_flux)) -> fba_substrates
+tidy_exhanges %>%
   filter(
-    !sim_O2,
-    fba_flux<0,
-    OTU%in% gem_analysis[anaerobic==T, OTU]
-    )%>% mutate(fba_flux=-(fba_flux)) -> fba_substrates_anaero
-
-## Filter products
-fba_comp_metab1 %>%
-  filter(
-    sim_O2,
     fba_flux>0,
-    OTU%in% gem_analysis[anaerobic==F, OTU]
-    ) -> fba_products_aero
+    ) %>% mutate(fba_flux=(fba_flux)) -> fba_products
 
-fba_comp_metab1 %>%
-  filter(
-    !sim_O2,
-    fba_flux>0,
-    OTU%in% gem_analysis[anaerobic==T, OTU]
-    ) -> fba_products_anaero
+fba_substrates %>%
+  filter(name == "Betaine" & fba_flux<=0.1) %>%
+  ggplot(aes(x=name, y=fba_flux, color=Order)) +
+  geom_boxplot() + geom_jitter() 
+  
+
+
+# Export products and substrates 
+tidy_exhanges %>%
+  group_by(name) %>%
+  summarise(
+    nmag_substrate = sum(fba_flux<0),
+    nmag_product = sum(fba_flux>0),
+  ) %>% fwrite("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/fba_substrates_products_nmags.csv")
+
+```
+
+## Test exchange flux frequencies
+```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+# Fisher test on substrates
+fba_substrates[] %>%
+  #filter(fba_flux>=0.1) %>%
+  group_by(name, Order, simple_category) %>%
+  summarise(n_use=sum(fba_flux>0)) %>%
+  left_join(order_nmags) %>%
+  #filter(Order %in% sel_orders) %>%
+  mutate(prop=100*(n_use/n)) %>% data.table -> subs
+
+foreach(i=unique(subs$name), .errorhandling = "remove")%do%{
+  fba_substrates[name==i] -> dt
+  dt %>%
+    group_by(Order) %>%
+    summarise(
+              n_use=n()
+              ) %>%
+    left_join(order_nmags) %>%
+    filter(n>=5)-> dt1
+
+total_use <- sum(dt1$n_use)
+total_n   <- sum(dt1$n)
+
+dt1 %>%
+  rowwise() %>%
+  mutate(
+    # 2x2 contingency table per order
+    ft = list(fisher.test(matrix(c(
+      n_use,                          # in order, with pathway
+      n - n_use,                      # in order, without pathway
+      total_use - n_use,              # not in order, with pathway
+      total_n - n - total_use + n_use # not in order, without pathway
+    ), nrow = 2))),
+    p_value  = ft$p.value,
+    odds_ratio = ft$estimate,
+    direction  = ifelse(n_use / n > total_use / total_n, "enriched", "depleted")
+  ) %>%
+  ungroup() %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+  select(Order, n_use, n, direction, odds_ratio, p_value, p_adj) %>%
+  arrange(p_adj) %>% add_column(Name=i)
+} %>% rbindlist -> sub_fish
+
+sub_fish%>%
+  filter(p_adj<=0.05 & direction == "enriched") -> sub_fish_sig
+
+
+# Fisher test on products
+fba_products[] %>%
+  group_by(name, Order, simple_category) %>%
+  summarise(n_use=sum(fba_flux>0)) %>%
+  left_join(order_nmags) %>%
+  #filter(Order %in% sel_orders) %>%
+  mutate(prop=100*(n_use/n)) %>% data.table -> prods
+
+foreach(i=unique(prods$name), .errorhandling = "remove")%do%{
+  fba_products[name==i] -> dt
+  dt %>%
+    group_by(Order) %>%
+    summarise(
+              n_use=n()
+              ) %>%
+    left_join(order_nmags) %>%
+    filter(n>=5)-> dt1
+
+total_use <- sum(dt1$n_use)
+total_n   <- sum(dt1$n)
+
+dt1 %>%
+  rowwise() %>%
+  mutate(
+    # 2x2 contingency table per order
+    ft = list(fisher.test(matrix(c(
+      n_use,                          # in order, with pathway
+      n - n_use,                      # in order, without pathway
+      total_use - n_use,              # not in order, with pathway
+      total_n - n - total_use + n_use # not in order, without pathway
+    ), nrow = 2))),
+    p_value  = ft$p.value,
+    odds_ratio = ft$estimate,
+    direction  = ifelse(n_use / n > total_use / total_n, "enriched", "depleted")
+  ) %>%
+  ungroup() %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+  select(Order, n_use, n, direction, odds_ratio, p_value, p_adj) %>%
+  arrange(p_adj) %>% add_column(Name=i)
+} %>% rbindlist -> prod_fish
+
+prod_fish%>%
+  filter(p_adj<=0.05 & direction == "enriched") -> prod_fish_sig
+
+
+# Results
+prod_fish_sig
+sub_fish_sig
 ```
 
 
+## FBA exchanges PCA
+```{r eval=F, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+c("Bacteroidales", "Flavobacteriales", "Cytophagales", "Desulfobulbales", "Desulfobacterales",
+  "Rhodobacterales", "Pseudomonadales", "Chromatiales",
+  "Rhizobiales", "Woeseiales"
+             ) -> sel_orders
+
+
+tidy_exhanges %>%
+  filter(Order %in% sel_orders) %>%
+  filter(fba_flux<0) %>%
+  #filter(name %in% sub_fish_sig$Name) %>%
+  mutate(fba_flux=abs(fba_flux)) %>%
+  #filter(fba_flux>0.1) %>%
+  select(OTU, name, fba_flux) %>%
+  pivot_wider(names_from = name, values_from = fba_flux, values_fill = 0) %>% 
+  column_to_rownames("OTU") %>% as.matrix() -> mat
+
+order_vec<-gem_analysis[OTU %in% rownames(mat), Order]
+names(order_vec)<-rownames(mat)
+ord_cols<-hcl.colors(palette = "Zissou 1", n = length(unique(order_vec)))
+names(ord_cols) = unique(order_vec)
+
+#order_vec<-rownames(mat)
+#ord_cols<-hcl.colors(palette = "Set3", n = length(order_vec))
+#names(ord_cols) = (order_vec)
+
+require(factoextra);require(FactoMineR)
+pca_res <- PCA(mat,
+           scale.unit = T,   # standardize variables
+           graph = FALSE)
+
+fviz_pca_ind(
+  pca_res,
+  axes = c(1, 2),
+  geom = c("point"),
+  repel = FALSE,
+  habillage = "none",
+  addEllipses = T,
+  ellipse.type  = "confidence",    # or "convex" / "norm" / "t"
+
+  col.ind       = order_vec[rownames(mat)],          # color by group
+  palette       = ord_cols,
+  fill.ind = "white",
+  col.ind.sup = "blue",
+  alpha.ind = 1,
+  select.ind = list(name = NULL, cos2 = NULL, contrib = NULL)
+)
+
+fviz_pca_biplot(pca_res,
+                # --- samples ---
+                geom.ind      = "point",
+                pointshape    = 19,
+                col.ind       = order_vec,          # color by group
+                palette       = ord_cols,
+                addEllipses   = T,            # confidence ellipses
+                ellipse.type  = "confidence",    # or "convex" / "norm" / "t"
+                ellipse.level = 0.95,            # 95% CI
+                label         = c("var"),           # label variables only,
+                labelsize     = 3,  
+                # --- variables (arrows) ---
+                col.var       = "black",
+                alpha.var =    0.1,
+                repel         = TRUE,  
+                title         = "PCA Biplot",
+                select.var = list(name = NULL,
+                                  cos2 = 50,
+                                  contrib = NULL)
+
+                )+
+  theme_bw() +
+  theme(axis.text = element_text(size=13))
+
+
+# ── PCoA ──────────────────────────────────────────────────────────────────────
+dist_matrix <- vegdist(scale((mat)), method = "euclidean", na.rm = T)
+pcoa        <- ape::pcoa(dist_matrix)
+
+# ── envfit arrows ─────────────────────────────────────────────────────────────
+env <- envfit(pcoa$vectors, mat, permutations = 999)
+
+# ── Variance explained ────────────────────────────────────────────────────────
+var_exp <- round(pcoa$values$Relative_eig * 100, 1)
+
+# ── plot with base vegan ───────────────────────────────────────────────────────
+plot(pcoa$vectors,
+     col = ord_cols[order_vec[rownames(mat)]],
+     xlab = paste0("PCoA1 (", var_exp[1], "%)"),
+     ylab = paste0("PCoA2 (", var_exp[2], "%)"),
+     main = "PCoA", lwd = 2, pch=20)
+     
+plot(env, p.max = 0.05, col="black")       # only significant arrows
+
+ordiellipse(pcoa$vectors[, 1:2],
+            groups = order_vec[rownames(mat)],
+            kind   = "se",                      # "se", "sd", or "ehull"
+            conf   = 0.95,
+            draw   = "polygon",
+            col    = ord_cols,
+            border = ord_cols,
+            alpha  = 0.1,
+            lwd    = 1.5) -> p
+
+legend("topright",
+       legend = names(ord_cols),
+       col    = ord_cols,
+       pt.bg  = ord_cols,
+       pch    = 21,
+       cex    = 0.9,
+       bty    = "n")    
+
+
+```
 
 ## Reaction fluxes
 ```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
@@ -914,7 +1027,7 @@ fba_comp_metab[grepl("rxn", react_id) &
   mutate(react_id2=str_remove(react_id,"_c0|_e0")) %>%
    left_join(key_reactions_simple) %>%
   left_join(gem_analysis[,
-                         c("OTU","growth_category", "anaerobic")]) %>%
+                         c("OTU","growth_category")]) %>%
   left_join(gem_analysis[, c("OTU","Phylum", "Class", "Order")])->fba_reactions
 fba_reactions$fba_flux %>% abs %>% quantile(seq(0,1,0.01)) %>%
   round(5)
@@ -923,16 +1036,22 @@ fba_reactions$fba_flux %>% abs %>% quantile(seq(0,1,0.01)) %>%
 fba_reactions[abs(fba_flux)>1e-3] %>%
   left_join(gem_analysis[, c("OTU","Phylum", "Class", "Order")]) -> fba_reactions_f
 index_reactions<-fba_reactions_f[,c("react_name")] %>% unique
+```
 
-tidy_reactions_f<-
-  rbind(
-  fba_reactions_f[sim_O2==T & anaerobic==F],
-  fba_reactions_f[sim_O2==F & anaerobic==T])
+# 
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
 
-tidy_reactions<-
-  rbind(
-  fba_reactions[sim_O2==T & anaerobic==F],
-  fba_reactions[sim_O2==F & anaerobic==T])
+key_metabolites[grepl("h2s", name, ignore.case = T)]
+fba_reactions[grepl("cpd00239", equation, ignore.case = T)] %>%
+  pull(react_name) %>% table %>% sort
+
+
+
+key_metabolites[grepl("methanethiol", name, ignore.case = T)]
+fba_reactions[grepl("cpd00324", equation, ignore.case = T)] %>%
+  pull(react_name) %>% table %>% sort
+
+
 ```
 
 #----
@@ -1171,7 +1290,7 @@ phold_annot2
 ```
 
 # Subset CDS
-```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=F}
 require(Biostrings)
 readDNAStringSet("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/vir/pipeline3_29aug24/OTU_morons2/pharokka_phold/prodigal-gv.ffn")-> aux_cds.fa
 names(aux_cds.fa) %>% str_extract(".*_[:digit:]+") -> cds_ids
@@ -1208,7 +1327,7 @@ left_join(
 ```
 
 # BlastP results
-```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=TRUE}
+```{r, echo = FALSE, warning=FALSE, message=FALSE, results='show', eval=F}
 blast_phold %>%
   left_join(aux_vfdb[,c("cds_id", "description")], by="cds_id") %>%
   mutate(
@@ -1267,6 +1386,26 @@ iphop_mags2 %>%
   summarise(n_votu=length(unique(virus))) %>%
   arrange(desc(n_votu)) %>%
   mutate(Order=str_remove(Order, "o__"))-> votu_order_count_all
+```
+
+# Check association between number of predicted vOTU and number ov MAGs by order
+```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+left_join(
+  order_nmags[,c("Order", "n")],
+  votu_order_count_all) %>%
+  column_to_rownames("Order") %>%
+  filter(!is.na(n_votu))-> order_votu_mag_counts
+
+# Distribution
+order_votu_mag_counts$n %>% shapiro_test()
+order_votu_mag_counts$n_votu %>% shapiro_test()
+
+# Test
+
+cor.test(order_votu_mag_counts$n, order_votu_mag_counts$n_votu, method = "spearman")
+plot(order_votu_mag_counts$n, order_votu_mag_counts$n_votu)
+
+
 ```
 
 # AUX: Find overlapping annotations between blastp_hits and gems genes (1)
@@ -1435,7 +1574,7 @@ foreach(i=1:nrow(top_aux_gem_react_summary2))%do%{
   top_aux_gem_react_summary2[i,react_name] -> react_nam
   
   gem_analysis[OTU %in% gem_ids, Order] %>% unique %>% paste(collapse = "|") -> order_vec
-  tidy_reactions_f[OTU %in% gem_ids & react_name %in% react_nam, fba_flux] -> fba_flux
+  fba_reactions_f[OTU %in% gem_ids & react_name %in% react_nam, fba_flux] -> fba_flux
   
   top_aux_gem_react_summary2[i,] %>% 
     add_column(median_flux=(median(abs(fba_flux))),
@@ -1446,7 +1585,6 @@ foreach(i=1:nrow(top_aux_gem_react_summary2))%do%{
 top_aux_gem_react_summary3 %>%
   select(product, react_name, Class, votu_id, gems_id) %>%
   fwrite("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/aux_in_gems.csv", sep = "\t", dec = ".")
-
 
 top_aux_gem_react_summary3 %>%
   select(Class, react_name, median_flux, nvotu, sbs_names, nmag, react_id) %>%
@@ -1480,7 +1618,7 @@ top_aux_gem_react_summary4$Class %>% unique
   geom_text(data = n_genes_votus,
             aes(x = nvotu+1, y=Class, label = paste0("", ngenes))) +
   theme_bw() +
-    xlab("Number of vOTUs carrying a putative AVG") +
+    xlab("Number of vOTUs with AVG") +
     ylab("Microbial metabolism") +
   scale_fill_gradientn(na.value = "white",colours = 
                       c(
@@ -1495,6 +1633,84 @@ ggsave(plot = p,
     width = 10, height = 8, units = "in", dpi = 600)
 
 file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/barplot_putative_avg_in_gems.png")
+```
+
+# Boxplots AVGs in GEMs, vOTU counts coloured by viral mechanism
+```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+top_aux_gem_react_summary_class<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/aux_in_gems_v7.csv") %>% select(Class, Class1, mechanism) %>% unique
+
+
+top_aux_gem_react_summary4 %>%
+  left_join(top_aux_gem_react_summary_class, by="Class") %>%
+  mutate(
+    mechanism = 
+      case_when(
+        mechanism == "Functional maintenance" ~ "Functional host maintenance",
+        .default = mechanism))-> top_aux_gem_react_summary5
+
+top_aux_gem_react_summary5 %>%
+  filter(mechanism != "") %>%
+  group_by(Class1) %>%
+  summarise(nvotu=sum(nvotu)) %>%
+  arrange((nvotu)) %>% pull(Class1) -> sorted_class_vec
+
+top_aux_gem_react_summary5 %>%
+  filter(mechanism != "") %>%
+  group_by(Class1,mechanism) %>%
+  summarise(nvotu=sum(nvotu)) %>%
+  mutate(Class1=factor(Class1, levels = sorted_class_vec)) %>%
+    ggplot() + 
+  geom_bar(aes(y=Class1, x=nvotu, fill=mechanism),
+           stat="identity", color="black", size=0.7) +
+  theme_bw() +
+    xlab("") +
+    ylab("AVG functional category") +
+  scale_fill_manual(values =
+                      c(
+                      "Resource scavenging" = alpha("paleturquoise3",0.2),
+                      "Functional host maintenance" = alpha("#F2B342",0.8))
+                    ) +
+  guides(fill=guide_legend("AVG-related strategy", nrow = 2),
+         ) +
+  theme(legend.position = "bottom", text = element_text(size=16)) -> p
+
+ggsave(plot = p,
+    "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/barplot_putative_avg_in_gems_count_only.png",
+    width = 8.35, height = 6, units = "in", dpi = 600)
+
+file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/barplot_putative_avg_in_gems_count_only.png")
+
+```
+
+# Number of AVGs examined
+```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+top_aux_gem_react_summary5$react_name %>% unique
+
+```
+
+# Proportion of AVGs by functional category
+```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+
+top_aux_gem_react_summary5 %>%
+  filter(!is.na(median_flux)) %>%
+  group_by(Class1) %>%
+  summarise(
+    min   = min(median_flux, na.rm = TRUE),
+    max   = max(median_flux, na.rm = TRUE),
+    range = max(median_flux, na.rm = TRUE) - min(median_flux, na.rm = TRUE),
+    abs_median = median(abs(median_flux), na.rm = TRUE)
+    
+  )
+```
+
+# Median flux values by category of AVGs
+```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+length(unique(top_aux_gem_react_summary2$react_name))
+top_aux_gem_react_summary3 %>% 
+  select(react_name, Class) %>% unique %>%
+  group_by(Class) %>%
+  summarise(prop=100*(n()/50)) %>% arrange(prop)
+
 ```
 
 # Verify react flux values and pathways
@@ -1922,7 +2138,7 @@ phold_annot2[grepl("Aux|Oth", func)]
 
 
 # Analyse AUX functions in GEMS
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+```{r eval=F, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
 
 "Galactose-3-O-Sulfotransferase"
 
@@ -2659,7 +2875,7 @@ res %>% datatable
 #----
 # GATHER RESULTS
 
-##AUX: Merge blastp aux hits with gems genes
+#AUX: Merge blastp aux hits with gems genes
 ```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
 gem_react_genes %>% 
   group_by(OTU, react_id, react_name) %>%
@@ -2738,7 +2954,7 @@ foreach(metabolite=unique(tidy_exhanges$id), .errorhandling = "remove")%do%{
       odds_ratio = fisher$estimate) %>%
     ungroup() %>%
     mutate(p_adj = p.adjust(p_value, method = "fdr")) %>%
-    filter(p_value<=0.05) %>%
+    filter(p_adj<=0.05) %>%
     add_column(id=metabolite, name=metab_name) %>%
     select(id, name, Order, median_imp, median_exp, n_imp, n_exp, n_use, n, odds_ratio, p_adj)
   } %>% rbindlist -> order_metab_fisher
@@ -2748,6 +2964,14 @@ order_metab_fisher %>%
 order_metab_fisher %>%
   filter(odds_ratio<1) -> order_metab_fisher_exported
   
+
+order_metab_fisher_imported %>%
+  group_by(Order) %>%
+  summarise(name=paste0(name, collapse = "; ")) %>% view
+
+order_metab_fisher_exported %>%
+  group_by(Order) %>%
+  summarise(name=paste0(name, collapse = "; ")) %>% view
 
 # Number of orders classifiables
 order_metab_fisher %>%
@@ -2819,11 +3043,24 @@ foreach(i=unique(tidy_exhanges$name), .errorhandling = "remove")%do%{
       add_column(p_adj=
         df$p_value %>% p.adjust(method = "fdr"))
   } %>% rbindlist() %>%
-  filter(p_value<0.05 & n_group>=5) %>% filter(median_group>0) %>%
+  filter(p_value<=0.05) %>% filter(median_group>0) %>%
   mutate(p_adj=round(p_adj, 5)) %>%
     mutate(FC=round((median_rest-median_group)/median_group, 3))-> top_prod
 
+top_prod %>%
+  group_by(group) %>%
+  summarise(name=paste0(name, collapse = "; "))
+
+top_prod %>%
+  group_by(name) %>%
+  summarise(n=n(),
+            group=paste0(group, collapse = "; ")) %>%
+  arrange(desc(n)) %>% print(n=Inf) -> top_prod_summary
+
+top_prod_summary$name
+
 ```
+
 
 # Top consumers by Order
 ```{r eval=T, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
@@ -2853,14 +3090,109 @@ foreach(i=unique(tidy_exhanges$name), .errorhandling = "remove")%do%{
       add_column(p_adj=
         df$p_value %>% p.adjust(method = "BH"))
   } %>% rbindlist() %>%
-  filter(p_value<0.05) %>% filter(median_group<0) %>% 
+  filter(p_adj<=0.05) %>% filter(median_group<0) %>% 
   mutate(p_adj=round(p_adj, 5))%>%
     mutate(FC=round((median_rest-median_group)/median_group, 3))-> top_sub
+
+top_sub %>%
+  group_by(group) %>%
+  summarise(name=paste0(name, collapse = "; "))
+
+top_sub %>%
+  group_by(name) %>%
+  summarise(n=n(),
+            group=paste0(group, collapse = "; ")) %>%
+  arrange(desc(n)) %>% print(n=Inf) %>% view
 ```
 
-# Produced plots
+# Pathway distribution 
+```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+files<-list.files(path = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq/",
+                  pattern ="-all-Pathways.tbl", full.names = T)
+foreach(i = files)%do%{
+fread(i) %>%
+  filter(Prediction) %>% 
+  mutate(sbs_ids = str_remove_all(ID, "\\|")) %>%
+  left_join(sbs_hier1) %>%
+    add_column(OTU=str_extract(i, "[:alpha:]{3}_SemiBin_[:digit:]+"))
+  } %>% rbindlist -> pws
+
+pws %>%
+  select(OTU, Name, h2, h3, h4, h5, ReactionsFound) %>%
+  left_join(gem_analysis[,c("OTU", "Order")]) %>%
+  rowwise %>%
+  mutate(n_react=length(unlist(strsplit(ReactionsFound, " ")))) %>%
+  data.table -> pws1
+
+
+pws1$h3 %>% unique
+
+pws1 %>%
+  select(h2, h3, h4, h5, Name) %>% unique -> pwy_unique
+
+pws1 %>%
+  group_by(h3, h4, h5, Name, Order) %>% 
+    left_join(gem_analysis[,c("OTU", "mean_mag_abund")]) %>%
+  summarise(n_mag=n(),
+            sum_abund=round(sum(mean_mag_abund),2),
+            #orders=paste0(unique(Order), collapse = ";")
+            ) -> pws_summary_order
+
+```
+
+##Classify pathway by order
+```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+foreach(i=unique(pws1$Name), .errorhandling = "remove")%do%{
+  pws1[Name==i] -> dt
+  dt %>%
+    group_by(Order) %>%
+    summarise(
+              n_pwy=n()
+              ) %>%
+    left_join(order_nmags) %>%
+    filter(n>=5)-> dt1
+
+total_pwy <- sum(dt1$n_pwy)
+total_n   <- sum(dt1$n)
+
+dt1 %>%
+  rowwise() %>%
+  mutate(
+    # 2x2 contingency table per order
+    ft = list(fisher.test(matrix(c(
+      n_pwy,                          # in order, with pathway
+      n - n_pwy,                      # in order, without pathway
+      total_pwy - n_pwy,              # not in order, with pathway
+      total_n - n - total_pwy + n_pwy # not in order, without pathway
+    ), nrow = 2))),
+    p_value  = ft$p.value,
+    odds_ratio = ft$estimate,
+    direction  = ifelse(n_pwy / n > total_pwy / total_n, "enriched", "depleted")
+  ) %>%
+  ungroup() %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+  select(Order, n_pwy, n, direction, odds_ratio, p_value, p_adj) %>%
+  arrange(p_adj) %>% add_column(Name=i)
+} %>% rbindlist -> pws_fish
+
+pws_fish %>%
+  filter(p_adj<0.05 & 
+         direction == "enriched" &
+          odds_ratio > 1 
+           )-> pwy_fish_ehnr
+
+pwy_fish_ehnr %>%
+  left_join(sbs_hier1) -> pwy_fish_ehnr_h
+
+pwy_fish_ehnr_h$Order %>% unique
+    
+```
+
+#---
+#FIGURES
+### Produced plots
 ```{r eval=F, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-top_prod1<-rbind(top_prod[p_adj<=0.05],top_sub[p_adj<=0.05])
+top_prod1<-rbind(top_prod,top_sub) %>% data.table()
 
 iphop_mags2 %>% 
   group_by(Phylum, Order) %>%
@@ -2873,268 +3205,50 @@ iphop_mags2 %>%
 order_nmags %>%
   filter(n>=5) %>% pull(Order)-> testable
 
+foreach(i=c("Hydrogen", "CO2", "H2S",
+            "Ammonium", "indol","Methanethiol",
+            "Acetate", "Propionate", "Butyrate"
+            ),.inorder = T)%do%{
+
 tidy_exhanges %>%
   filter(Order %in% testable) %>%
-  filter(name=="Acetate") %>%
-  mutate(votu=case_when(Order %in% top_prod1[name=="Acetate", group]~ T))-> dt
-
-dt$fba_flux %>% median->med_p1
-dt %>% group_by(Order) %>% 
+  filter(name==i) %>%
+  mutate(significance=case_when(Order %in% top_prod1[name==i, group]~ "s", .default = "ns")
+          )-> df
+              
+df %>% group_by(Order) %>% 
     summarise(median=median(fba_flux)) %>%
   arrange((median)) -> sorted
 
-ggplot(dt %>%
+ggplot(df %>%
         mutate(Order=factor(Order, levels=sorted$Order)),
-       aes(x = fba_flux, y = Order, fill = votu)) +
-  geom_boxplot() +
-  geom_vline(aes(xintercept=med_p1), color="red", linetype = "dashed", size=1)+
+       aes(x = fba_flux, y = Order, fill = significance)) +
+  geom_boxplot(outliers = F) +
+  geom_jitter(size=0.1, alpha = 0.3) +
+  geom_vline(xintercept=median(df$fba_flux), color="red", linetype = "dashed", size=0.5) +
   theme_bw() +
-  ggtitle("Acetate") +
+  ggtitle(i) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
   ylab("") +
   xlab("") +
   scale_fill_manual(
-    values = c("lightblue"), na.value = "white")-> p1
+    values = c(s="red", ns="white"), na.value = "white")
 
+} -> pl
 
-#####################
-tidy_exhanges %>%
-  filter(Order %in% testable) %>%
-  filter(name=="Succinate") %>%
-  mutate(votu=case_when(Order %in% top_prod1[name=="Succinate", group] ~ T))-> dt
-
-dt$fba_flux %>% median->med_p2
-dt %>% group_by(Order) %>% 
-    summarise(median=median(fba_flux)) %>%
-  arrange((median)) -> sorted
-ggplot(dt %>%
-        mutate(Order=factor(Order, levels=sorted$Order)),
-       aes(x = fba_flux, y = Order, fill = votu)) +
-  geom_boxplot() +
-  geom_vline(aes(xintercept=med_p2), color="red", linetype = "dashed", size=1)+
-  theme_bw() +
-  ggtitle("Succinate") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
-  ylab("") +
-  xlab("")+
-  scale_fill_manual(
-    values = c("lightblue"), na.value = "white")->p2
-
-#####################
-tidy_exhanges %>%
-  filter(Order %in% testable) %>%
-  filter(name=="Ammonium")%>%
-  mutate(votu=case_when(Order%in%top_prod1[name=="Ammonium", group] ~ T))-> dt
-
-dt$fba_flux %>% median->med_p3
-dt %>% group_by(Order) %>% 
-    summarise(median=median(fba_flux)) %>%
-  arrange((median)) -> sorted
-ggplot(dt %>%
-        mutate(Order=factor(Order, levels=sorted$Order)),
-       aes(x = fba_flux, y = Order, fill = votu)) +
-  geom_boxplot() +
-  geom_vline(aes(xintercept=med_p3), color="red", linetype = "dashed", size=1)+
-  theme_bw() +
-  ggtitle("Ammonium") +
-  
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
-  ylab("") +
-  xlab(expression(atop("Exchange flux", mmol~g[DW]^{-1}~h^{-1}))) +
-  scale_fill_manual(
-    values = c("lightblue"), na.value = "white")->p3
-
-#####################
-tidy_exhanges %>%
-  filter(Order %in% testable) %>%
-  filter(name=="CO2")%>%
-  mutate(votu=case_when(Order%in%top_prod1[name=="CO2", group] ~ T))-> dt
-
-dt$fba_flux %>% median->med_p4
-
-dt %>% group_by(Order) %>% 
-    summarise(median=median(fba_flux)) %>%
-  arrange((median)) -> sorted
-ggplot(dt %>%
-        mutate(Order=factor(Order, levels=sorted$Order)),
-       aes(x = fba_flux, y = Order, fill = votu)) +
-  geom_boxplot() +
-  geom_vline(aes(xintercept=med_p4), color="red", linetype = "dashed", size=1)+
-  theme_bw() +
-  ggtitle("Carbon dioxide") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
-  ylab("") +
-  xlab(expression(atop("Exchange flux", mmol~g[DW]^{-1}~h^{-1}))) +
-  scale_fill_manual(
-    values = c("lightblue"), na.value = "white")->p4
-
-
-require(patchwork)
-(p1+p2) / (p3+p4)->pf
+(pl[[1]]+pl[[2]]+pl[[3]] + coord_cartesian(xlim = c(-1, 2)))  / 
+  (pl[[4]]+pl[[5]]+pl[[6]]) / 
+  (pl[[7]]+pl[[8]]+pl[[9]]) ->pf
 
 ggsave(plot = pf, filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/boxplot_products_vir.png",
-       height = 8,width = 10, units = "in", dpi = 600
+       height = 10, width = 16, units = "in", dpi = 600
        )
 file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/boxplot_products_vir.png")
 
-
-ggsave(plot = pf, filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/boxplot_products_vir.pdf",
-       height = 8,width = 10, units = "in", dpi = 600
-       )
-file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/boxplot_products_vir.pdf")
-
-
-#####################
-tidy_exhanges %>%
-  filter(Order %in% testable) %>%
-  filter(name=="Ethanol")%>%
-  mutate(votu=case_when(Order%in%top_prod1[name=="Ethanol", group] ~ T))-> dt
-
-dt$fba_flux %>% median->med_p4
-
-dt %>% group_by(Order) %>% 
-    summarise(median=median(fba_flux)) %>%
-  arrange((median)) -> sorted
-ggplot(dt %>%
-        mutate(Order=factor(Order, levels=sorted$Order)),
-       aes(x = fba_flux, y = Order, fill = votu)) +
-  geom_boxplot() +
-  geom_vline(aes(xintercept=med_p4), color="red", linetype = "dashed", size=1)+
-  theme_bw() +
-  ggtitle("Methanethiol") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
-  ylab("") +
-  xlab("Exchange flux [mmol/gDWh]") +
-  scale_fill_manual(
-    values = c("lightblue"), na.value = "white")
 ```
 
+##Heatmap: MetaB utilisation by order v2
 ```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-
-#####
-tidy_exhanges %>%
-  filter(Order %in% testable) %>%
-  filter(name=="Succinate")%>%
-  mutate(votu=case_when(Order%in%top_prod[p_adj<=0.05 & name=="Succinate", group]  ~ "Produced",
-                        Order%in%top_sub[p_adj<=0.05 & name=="Succinate", group] ~ "Consumed")
-         )-> dt
-
-dt$fba_flux %>% median->med_p1
-
-dt %>% group_by(Order) %>% 
-    summarise(median=median(fba_flux)) %>%
-  arrange((median)) -> sorted
-ggplot(dt %>%
-        mutate(Order=factor(Order, levels=sorted$Order)),
-       aes(x = fba_flux, y = Order, fill = votu)) +
-  geom_boxplot() +
-  geom_vline(aes(xintercept=med_p1), color="red", linetype = "dashed", size=1)+
-  theme_bw() +
-  ggtitle("Succinate") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
-  ylab("") +
-  xlab("") +
-  scale_fill_manual(
-    values = c(Produced="red3",Consumed="lightblue"), na.value = "white")-> p1
-#####
-
-
-tidy_exhanges %>%
-  filter(Order %in% testable) %>%
-  filter(name=="Acetate")%>%
-  mutate(votu=case_when(Order%in%top_prod[p_adj<=0.05 & name=="Acetate", group]  ~ "Produced",
-                        Order%in%top_sub[p_adj<=0.05 & name=="Acetate", group] ~ "Consumed")
-         )-> dt
-
-dt$fba_flux %>% median->med_p2
-
-dt %>% group_by(Order) %>% 
-    summarise(median=median(fba_flux)) %>%
-  arrange((median)) -> sorted
-ggplot(dt %>%
-        mutate(Order=factor(Order, levels=sorted$Order)),
-       aes(x = fba_flux, y = Order, fill = votu)) +
-  geom_boxplot() +
-  geom_vline(aes(xintercept=med_p2), color="red", linetype = "dashed", size=1)+
-  theme_bw() +
-  ggtitle("Acetate") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
-  ylab("") +
-  xlab("") +
-  scale_fill_manual(
-    values =  c(Produced="red3",Consumed="lightblue"), na.value = "white")-> p2
-
-####
-
-tidy_exhanges %>%
-  filter(Order %in% testable) %>%
-  filter(name=="Ammonium")%>%
-  mutate(votu=case_when(Order%in%top_prod[p_adj<=0.05 & name=="Ammonium", group]  ~ "Produced",
-                        Order%in%top_sub[p_adj<=0.05 & name=="Ammonium", group] ~ "Consumed")
-         )-> dt
-
-dt$fba_flux %>% median->med_p3
-
-dt %>% group_by(Order) %>% 
-    summarise(median=median(fba_flux)) %>%
-  arrange((median)) -> sorted
-ggplot(dt %>%
-        mutate(Order=factor(Order, levels=sorted$Order)),
-       aes(x = fba_flux, y = Order, fill = votu)) +
-  geom_boxplot() +
-  geom_vline(aes(xintercept=med_p3), color="red", linetype = "dashed", size=1)+
-  theme_bw() +
-  ggtitle("Ammonium") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
-  ylab("") +
-  xlab("Exchange flux [mmol/gDWh]") +
-  scale_fill_manual(
-    values =  c(Produced="red3",Consumed="lightblue"), na.value = "white")-> p3
-
-####
-
-tidy_exhanges %>%
-  filter(Order %in% testable) %>%
-  filter(name=="CO2")%>%
-  mutate(votu=case_when(Order%in%top_prod[p_adj<=0.05 & name=="CO2", group]  ~ "Produced",
-                        Order%in%top_sub[p_adj<=0.05 & name=="CO2", group] ~ "Consumed")
-         )-> dt
-
-dt$fba_flux %>% median->med_p4
-
-dt %>% group_by(Order) %>% 
-    summarise(median=median(fba_flux)) %>%
-  arrange((median)) -> sorted
-ggplot(dt %>%
-        mutate(Order=factor(Order, levels=sorted$Order)),
-       aes(x = fba_flux, y = Order, fill = votu)) +
-  geom_boxplot() +
-  geom_vline(aes(xintercept=med_p4), color="red", linetype = "dashed", size=1)+
-  theme_bw() +
-  ggtitle("Carbon dioxide") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
-  ylab("") +
-  xlab("Exchange flux [mmol/gDWh]") +
-  scale_fill_manual(
-    values =  c(Produced="red3",Consumed="lightblue"), na.value = "white") -> p4
-
-
-
-
-
-(p1+p2) / (p3+p4)->pf
-
-ggsave(plot = pf, filename = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/boxplot_products_vir.png",
-       height = 8,width = 10, units = "in", dpi = 600
-       )
-file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/boxplot_products_vir.png")
-
-```
-
-#---
-#FIGURES
-## Metabolites ranked by flux
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
 tidy_exhanges %>%
   group_by(name,simple_category) %>%
   summarise(median_pos=median(fba_flux[fba_flux>0], na.rm = T),
@@ -3143,12 +3257,10 @@ tidy_exhanges %>%
             prop_neg=round(100*(sum(fba_flux[fba_flux<0], na.rm = T)/311),2)
             ) %>%
   arrange(desc(median_pos)) -> exchanges_summary
-```
 
-##Heatmap: MetaB utilisation by order v2
-```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
 #####  HM O2
 require(ComplexHeatmap)
+tidy_exhanges<-fba_comp_metab1
 
 # vOTU abundance by host order
 votu_host_order_abund<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/votu_host_order_mean.csv")
@@ -3156,7 +3268,14 @@ votu_host_order_abund$Order = str_remove(votu_host_order_abund$Order,"o__")
 votu_host_order_abund_vec<-votu_host_order_abund$mean
 names(votu_host_order_abund_vec) = votu_host_order_abund$Order
 
-# Select thos with at least two votus
+
+# Select orders
+# Select orders
+c("Bacteroidales", "Rhizobiales", "Pseudomonadales",  "Rhodobacterales", "Chromatiales", "Flavobacteriales", "Desulfobacterales", "Desulfobulbales", "Cytophagales",  "Woeseiales", "JAAYZQ01", "SZUA-229"
+             ) -> sel_orders
+
+
+## Wider alternative
 votu_order_count_all %>%
   filter(n_votu>=2) -> order_min2_votu
 
@@ -3170,15 +3289,15 @@ selected_classes<-c(
 
 tax_lev="Order"
 
-tidy_exhanges[Order %in% order_min2_votu$Order] %>%
+tidy_exhanges[Order %in% sel_orders] %>%
   filter(abs(fba_flux)>0.001) %>%
   group_by(name, Order, simple_category) %>%
   summarise(n_flux=n()) %>%
   left_join(order_nmags[,c("Order", "n")]) %>%
   mutate(prop=n_flux/n) %>%
-  filter(prop>0.2) -> freq_exc
+  filter(prop>0.5) -> freq_exc
 
-tidy_exhanges[Order %in% order_min2_votu$Order] %>%
+tidy_exhanges[Order %in% sel_orders] %>%
   filter(abs(fba_flux)>0.001) %>%
   select(name, simple_category, !!sym(tax_lev), fba_flux) %>%
   filter(simple_category %in% selected_classes) %>%
@@ -3188,8 +3307,8 @@ tidy_exhanges[Order %in% order_min2_votu$Order] %>%
     tax=as.factor(!!sym(tax_lev)),
     name=factor(name, levels=unique(tidy_exhanges$name)))-> medians
 
-semi_join(medians, freq_exc, by=c("name", "Order")) %>%
-  select(name, simple_category, Order, median, tax)-> medians
+#semi_join(medians, freq_exc, by=c("name", "Order")) %>%
+#  select(name, simple_category, Order, median, tax)-> medians
 
 quant<-medians$median %>% quantile(seq(0,1,0.05));quant
 
@@ -3230,11 +3349,11 @@ gem_analysis$Phylum %>% as.factor->phy_vec
 names(phy_vec)=gem_analysis %>% pull(!!sym(tax_lev))
 
 # Define HM body colors
-flux_colors=c(alpha("cadetblue",1),
-              alpha("cadetblue",0.3),
+flux_colors=c(alpha("cadetblue",0.8),
+              alpha("cadetblue",0.8),
               "white",
-              alpha("red",0.4),
-              alpha("red",1)
+              alpha("red",0.8),
+              alpha("red",0.8)
               )
 
 # Transpose matrix
@@ -3270,7 +3389,7 @@ ngems_order_df_vec %>% sort
 # Predicted biomass growth
 biomass_order_df<-gem_analysis %>%
   group_by(Order) %>%
-  summarise(mean=mean(growth_value))
+  summarise(mean=mean(growth))
 biomass_order_df$mean->biomass_order_df_vec
 names(biomass_order_df_vec)=biomass_order_df$Order
 
@@ -3332,7 +3451,7 @@ HeatmapAnnotation(
 
 # Right annot
 rownames(reorder_mat)%in%
-metab_react_matched_cpds3[!is.na(avg_rel_abund), name] %>% as.character->metaB_presence_vec
+metab_react_matched_cpds_mean_scaled[, name] %>% as.character->metaB_presence_vec
 names(metaB_presence_vec)=rownames(reorder_mat)
 
 
@@ -3412,25 +3531,271 @@ Heatmap(
   #heatmap_width = unit(14, "in"),
   show_heatmap_legend = F,
   right_annotation = right_annot,
-  top_annotation = bottom_annot,
-  bottom_annotation = top_annot,
-  left_annotation = left_annot
-) ->hm
+  #top_annotation = bottom_annot,
+  #bottom_annotation = top_annot
+  #left_annotation = left_annot
+) ->hm_ex
 png(filename = 
       paste0(
-      "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/hm_exchanges_test_v2.png"),
-    width = 17, height = 20, units = "in", res = 300)
-draw(hm, heatmap_legend_side = "bottom", annotation_legend_side = "bottom")
+      "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/hm_exchanges_test_v4_metab_med_0.1-10.png"),
+    width = 10, height = 20, units = "in", res = 300)
+draw(hm_ex, heatmap_legend_side = "bottom", annotation_legend_side = "bottom")
 dev.off()
 
-file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/hm_exchanges_test_v2.png")
+file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/hm_exchanges_test_v4_metab_med_0.1-10.png")
 
 ```
 
-## Distribution of complete pws for key categories
+
+
+
+##Heatmap: MetaB frequency utilisation by order v2
+```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+tidy_exhanges %>%
+  group_by(name,simple_category) %>%
+  summarise(median_pos=median(fba_flux[fba_flux>0], na.rm = T),
+            median_neg=median(fba_flux[fba_flux<0], na.rm = T),
+            prop_pos=round(100*(sum(fba_flux[fba_flux>0], na.rm = T)/311),2),
+            prop_neg=round(100*(sum(fba_flux[fba_flux<0], na.rm = T)/311),2)
+            ) %>%
+  arrange(desc(median_pos)) -> exchanges_summary
+
+#####  HM O2
+require(ComplexHeatmap)
+tidy_exhanges<-fba_comp_metab1
+
+# vOTU abundance by host order
+votu_host_order_abund<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/votu_host_order_mean.csv")
+votu_host_order_abund$Order = str_remove(votu_host_order_abund$Order,"o__")
+votu_host_order_abund_vec<-votu_host_order_abund$mean
+names(votu_host_order_abund_vec) = votu_host_order_abund$Order
+
+
+# Select orders
+# Select orders
+c("Bacteroidales", "Rhizobiales", "Pseudomonadales",  "Rhodobacterales", "Chromatiales", "Flavobacteriales", "Desulfobacterales", "Desulfobulbales", "Cytophagales",  "Woeseiales", "JAAYZQ01", "SZUA-229", "Caldilineales"
+             ) -> sel_orders
+
+
+## Wider alternative
+votu_order_count_all %>%
+  filter(n_votu>=2) -> order_min2_votu
+
+# Select which categories to plot
+unique(tidy_exhanges$simple_category)
+selected_classes<-c(
+    "Polysaccharides", "Carbohydrates", "Sugar Alcohols",
+    "Alcohols", "Carbonyl compounds",
+    "Sulfur compounds",
+    "N-Carbonyl compounds","Amino acids", "Nitrogen compounds", "Inorganic compounds")
+
+# Heatmap for substrates
+tax_lev="Order"
+tidy_exhanges[Order %in% sel_orders] %>%
+  filter((fba_flux)<(-0.001)) %>%
+  group_by(name, Order, simple_category) %>%
+  summarise(n_flux=n()) %>%
+  left_join(order_nmags[,c("Order", "n")]) %>%
+  mutate(prop=n_flux/n) %>%
+  filter(prop>0.50) -> freq_exc
+
+  freq_exc %>%
+    select(name, prop) %>%
+  pivot_wider(names_from = name, values_from = prop, values_fill = 0) %>%
+  column_to_rownames("Order") %>%
+  as.matrix  -> order_mat
+
+tidy_exhanges[name %in% freq_exc$name,c("name", "simple_category")] %>%
+    filter(simple_category %in% selected_classes) %>%
+  unique %>% filter(name %in% colnames(order_mat)) %>%
+  mutate(simple_category=
+           factor(
+           simple_category,
+         levels = 
+          selected_classes)) %>% arrange(simple_category) -> metab_cat
+
+metab_class_vec=metab_cat$simple_category
+names(metab_class_vec)=metab_cat$name
+
+
+# Define splitting vectors
+gem_analysis$Phylum %>% as.factor->phy_vec
+names(phy_vec)=gem_analysis %>% pull(!!sym(tax_lev))
+
+# Transpose matrix
+reorder_mat<-order_mat %>% t
+reorder_mat<-reorder_mat[names(metab_class_vec),]
+
+# Right annot
+rownames(reorder_mat)%in%
+metab_react_matched_cpds_mean_scaled[, name] %>% as.character->metaB_presence_vec
+names(metaB_presence_vec)=rownames(reorder_mat)
+
+
+right_annot<-
+rowAnnotation(
+  #spacer=anno_empty(border = F, height = unit(0.5, "mm")),
+  " "=metaB_presence_vec[rownames(reorder_mat)],
+  annotation_name_side = "bottom",
+  col=list(" "=c("FALSE"="white","TRUE"="gray80")),
+  border=T,
+  show_legend = F)
+
+#reorder_mat<-order_mat[,(metab_cat$name)]
+dim(order_mat[, names(metab_class_vec)])
+Heatmap(
+  reorder_mat,
+  col=c("white","white", "skyblue", "cadetblue"), na_col = "white",
+  rect_gp = gpar(col = "gray20", lwd = 0.3),
+  border_gp = gpar(col = "black", lwd = 0.7),
+  row_gap= unit(3, "mm"),
+  column_gap= unit(3, "mm"),
+  row_split = metab_class_vec,
+  column_title_rot = 45,
+  column_title_gp = gpar(fontsize=0),
+  column_names_rot = 45,
+  column_names_gp  = gpar(fontsize=13),
+  column_title_side = "bottom",
+  column_split = phy_vec[colnames(reorder_mat)],
+  column_names_side = "top",
+  row_title_rot=0,
+  row_names_gp = gpar(fontsize=10),
+  row_title_gp  = gpar(fontsize=13),
+  border = T,
+  cluster_rows = T,
+  cluster_columns = F,
+  cluster_column_slices = F,
+  cluster_row_slices = F,
+  show_column_dend = F,
+  show_row_dend = F,
+  #heatmap_height = unit(10, "in"),
+  #heatmap_width = unit(14, "in"),
+  show_heatmap_legend = T,
+  right_annotation = right_annot,
+  width           = ncol(reorder_mat) * 1,   # fixed: same cols in every slice
+  height          = nrow(reorder_mat) * 1,
+  heatmap_legend_param =list(title = "% of GEMs\n with exchange",
+                             direction = "horizontal",
+                             border=T,
+                             title_position = "topcenter",
+                             legend_height = unit(8, "cm"),
+                             grid_width    = unit(16, "mm"),
+                             title_gp      = gpar(fontsize = 14, fontface = "bold"),
+                             labels_gp     = gpar(fontsize = 12)
+                             
+                             )
+) ->hm_ex_sub
+
+
+# Heatmap for products
+tax_lev="Order"
+tidy_exhanges[Order %in% sel_orders] %>%
+  filter((fba_flux)>(0.001)) %>%
+  group_by(name, Order, simple_category) %>%
+  summarise(n_flux=n()) %>%
+  left_join(order_nmags[,c("Order", "n")]) %>%
+  mutate(prop=n_flux/n) %>%
+  filter(prop>0.50) -> freq_exc
+
+  freq_exc %>%
+    select(name, prop) %>%
+  pivot_wider(names_from = name, values_from = prop, values_fill = 0) %>%
+  column_to_rownames("Order") %>%
+  as.matrix  -> order_mat
+
+tidy_exhanges[name %in% freq_exc$name,c("name", "simple_category")] %>%
+    filter(simple_category %in% selected_classes) %>%
+  unique %>% filter(name %in% colnames(order_mat)) %>%
+  mutate(simple_category=
+           factor(
+           simple_category,
+         levels = 
+          selected_classes)) %>% arrange(simple_category) -> metab_cat
+
+metab_class_vec=metab_cat$simple_category
+names(metab_class_vec)=metab_cat$name
+
+
+# Define splitting vectors
+gem_analysis$Phylum %>% as.factor->phy_vec
+names(phy_vec)=gem_analysis %>% pull(!!sym(tax_lev))
+
+# Transpose matrix
+reorder_mat<-order_mat %>% t
+reorder_mat<-reorder_mat[names(metab_class_vec),]
+
+# Right annot
+rownames(reorder_mat)%in%
+metab_react_matched_cpds_mean_scaled[, name] %>% as.character->metaB_presence_vec
+names(metaB_presence_vec)=rownames(reorder_mat)
+
+
+right_annot<-
+rowAnnotation(
+  #spacer=anno_empty(border = F, height = unit(0.5, "mm")),
+  "Detected metabolites"=metaB_presence_vec[rownames(reorder_mat)],
+  annotation_name_side = "bottom",
+  col=list("Detected metabolites"=c("FALSE"="white","TRUE"="gray80")),
+  border=T,
+  show_legend = F,
+  annotation_name_rot  = 45)
+
+#reorder_mat<-order_mat[,(metab_cat$name)]
+dim(order_mat[, names(metab_class_vec)])
+Heatmap(
+  reorder_mat,
+  col=c("white", "white","tan1", "red"), na_col = "white",
+  rect_gp = gpar(col = "gray20", lwd = 0.3),
+  border_gp = gpar(col = "black", lwd = 0.7),
+  row_gap= unit(3, "mm"),
+  column_gap= unit(3, "mm"),
+  row_split = metab_class_vec,
+  column_title_rot = 45,
+  column_title_gp = gpar(fontsize=13),
+  column_names_rot = 45,
+  column_names_gp  = gpar(fontsize=13),
+  column_title_side = "bottom",
+  column_split = phy_vec[colnames(reorder_mat)],
+  column_names_side = "top",
+  row_title_rot=0,
+  row_names_gp = gpar(fontsize=10),
+  row_title_gp  = gpar(fontsize=13),
+  border = T,
+  cluster_rows = T,
+  cluster_columns = F,
+  cluster_column_slices = F,
+  cluster_row_slices = F,
+  show_column_dend = F,
+  show_row_dend = F,
+  #heatmap_height = unit(10, "in"),
+  #heatmap_width = unit(14, "in"),
+  show_heatmap_legend = F,
+  right_annotation = right_annot,
+  width           = ncol(reorder_mat) * 1,   # fixed: same cols in every slice
+  height          = nrow(reorder_mat) * 1
+) ->hm_ex_prod
+
+
+
+
+png(filename = 
+      paste0(
+      "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/hm_exchanges_test_v4_metab_med_0.1-10.png"),
+    width = 8, height = 15, units = "in", res = 600)
+draw(hm_ex_sub %v% hm_ex_prod,
+     heatmap_legend_side = "bottom",
+     padding = unit(c(15, 5, 10, 5), "mm")
+     )
+dev.off()
+
+file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/hm_exchanges_test_v4_metab_med_0.1-10.png")
+
+```
+
+
+## PWYs by key categories
 ```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
 # Import pwy data
-
 files<-list.files(path = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq/",
                   pattern ="-all-Pathways.tbl", full.names = T)
 foreach(i = files)%do%{
@@ -3441,11 +3806,16 @@ fread(i) %>%
     add_column(OTU=str_extract(i, "[:alpha:]{3}_SemiBin_[:digit:]+"))
   } %>% rbindlist -> pws
 
+# Number of unique pws
+pws$ID %>% unique %>% length()
+tidy_exhanges$name %>% unique %>% length
+
 pws %>%
   select(OTU, Name, h2, h3, h4, h5, ReactionsFound) %>%
   left_join(gem_analysis[,c("OTU", "Order")]) %>%
   rowwise %>%
-  mutate(n_react=length(unlist(strsplit(ReactionsFound, " ")))) %>% data.table -> pws1
+  mutate(n_react=length(unlist(strsplit(ReactionsFound, " ")))) %>%
+  data.table -> pws1
 
 
 # vOTU abundance by host order
@@ -3516,7 +3886,6 @@ df %>%
 
 pwy_count %>% pivot_wider(names_from = Order, values_from = p, values_fill = 0) %>% 
   column_to_rownames("Name")  %>% as.matrix -> mat
-
 
 # Define splitting vectors columns
 gem_analysis$Phylum %>% as.factor->phy_vec
@@ -3618,1101 +3987,680 @@ file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man
 ```
 
 
-#---- METABOLITE UTILISATION ----
-# SULFUR
-## Examine substrates
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_substrates_aero[simple_category=="Sulfur compounds"];selected_mets
-met_report(selected_mets,
-           fba_substrates_aero,
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           c("consumed","produced", "transported"),
-           ko_f_aero, fisher_aero)
-
-selected_mets<-sorted_substrates_anaero[simple_category=="Sulfur compounds"];selected_mets
-met_report(selected_mets,
-           fba_substrates_anaero,
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           "consumed",
-           ko_f_anaero, fisher_anaero)
-
-# Sulfate
-key_metabolites[name=="Sulfate"]
-find_metab_react("cpd00048", tidy_reactions[]) %>% datatable
-tidy_reactions[react_name=="ATP:sulfate adenylyltransferase"] %>%
-  group_by(Order) %>% count %>% arrange(desc(n)) %>% print(n=50)
-
-
-key_metabolites[name=="APS"]
-find_metab_react("cpd00193", tidy_reactions[]) %>% datatable
-fba_reactions[react_id=="rxn00379_c0"] %>%
-  group_by(react_name) %>% count
-
-key_metabolites[name=="3-phosphoadenylylsulfate"]
-find_metab_react("cpd00044", tidy_reactions[]) %>% datatable
-
-# CHECK PAPS reductases
-tidy_reactions[react_id=="rxn05239_c0"] %>%
-  select(OTU, react_name, Phylum, Order) %>% unique-> sel_react
-
-sel_react$OTU %>% unique %>% length
-sel_react %>% group_by(Phylum) %>% 
-  count(sort = T) %>%
-left_join(phy_count) %>% mutate(100*(n/n_phyla))
-
-sel_react %>% group_by(Order) %>% 
-  count(sort = T) %>%
-left_join(order_count) %>% mutate(prop=100*(n/n_order))
-
-tidy_reactions[react_id=="rxn09069_c0"] %>% 
-  select(OTU, react_name, Phylum, Order) %>% unique-> sel_react
-
-sel_react$OTU %>% unique %>% length
-sel_react %>% group_by(Phylum) %>% 
-  count(sort = T) %>%
-left_join(phy_count) %>% mutate(100*(n/n_phyla))
-
-sel_react %>% group_by(Order) %>% 
-  count(sort = T) %>%
-left_join(order_count) %>% mutate(prop=100*(n/n_order))
-
-
-key_metabolites[name=="Taurine"]
-find_metab_react("cpd00210", tidy_reactions) %>% datatable
-#Is taurine linked to O2?
-tidy_exhanges[name=="Taurine", ]
-
-key_metabolites[name=="Sulfoacetaldehyde"]
-find_metab_react("cpd00460", tidy_reactions) %>% datatable
-
-key_metabolites[name=="Sulfoacetate"]
-find_metab_react("cpd09878", tidy_reactions) %>% datatable
-
-# Sulfide
-key_metabolites[name=="L-Methionine"]
-find_metab_react("cpd00060", tidy_reactions) %>% datatable
-
-
-key_metabolites[name=="S-Adenosyl-L-methionine"]
-find_metab_react("cpd00017", tidy_reactions) %>% datatable
-
-# How produces more S-Methilthioribose?
-key_metabolites[grep("5-Methylthio-D-ribose", name)]
-tidy_exhanges[react_id=="EX_cpd01981_e0", Order] %>% table %>% sort
-
-tidy_reactions_f[react_id=="rxn05909_c0"] %>% 
-  select(OTU, react_name, Phylum, Order) %>% unique-> sel_react
-
-sel_react$OTU %>% unique %>% length
-sel_react %>% group_by(Phylum) %>% 
-  count(sort = T) %>%
-left_join(phy_count) %>% mutate(100*(n/n_phyla))
-
-
-key_metabolites[name=="L-Cysteine"]
-find_metab_react("cpd00084", tidy_reactions) %>% datatable
-
-key_metabolites[grepl("Cyste",name)]
-find_metab_react("cpd00084", tidy_reactions) %>% datatable
-# Cysteine conversion to Serine and Pyruvate
-tidy_reactions_f[react_id=="rxn05909_c0"] %>% 
-  select(OTU, react_name, Phylum, Order) %>% unique-> sel_react
-
-sel_react$OTU %>% unique %>% length
-sel_react %>% group_by(Phylum) %>% 
-  count(sort = T) %>%
-left_join(phy_count) %>% mutate(100*(n/n_phyla))
-
-sel_react %>% group_by(Order) %>% 
-  count(sort = T) %>%
-left_join(order_count) %>% mutate(prop=100*(n/n_order))
-
-
-tidy_reactions_f[react_id=="rxn00566_c0"] %>% 
-  select(OTU, react_name, Phylum, Order) %>% unique-> sel_react
-
-sel_react$OTU %>% unique %>% length
-sel_react %>% group_by(Phylum) %>% 
-  count(sort = T) %>%
-left_join(phy_count) %>% mutate(100*(n/n_phyla))
-
-sel_react %>% group_by(Order) %>% 
-  count(sort = T) %>%
-left_join(order_count) %>% mutate(prop=100*(n/n_order)) %>% print(n=50)
-
-
-# Virus
-#Sulfate
-blast_phold[grepl("sulfate",product)]
-gem_react_genes[OTU=="nat_SemiBin_881" & grepl("megahit_391107", gene)] %>%
-  left_join(gem_analysis[,c("OTU", "Order")])
-
-phold_annot2[grepl("phosphoadenosine phosphosulfate reductase", product)]
-
-phold_annot2[grepl("Galactose-3-O-sulfotransferase", product), votu] %>%
-  unique->votus
-length(votus)
-phold_annot2[votu%in% votus] %>% group_by(product) %>% 
-  count(sort = T) %>% print(n=200)
-vir_analysis[votu%in%votus, c("Class", "size_kb", "host_taxonomy")] 
-
-phold_annot2[grepl("phosphoadenosine phosphosulfate reductase", product), votu] %>% unique->votus
-length(votus)
-phold_annot2[votu%in% votus] %>% 
-  group_by(product) %>% 
-  count(sort = T) %>% print(n=200)
-vir_analysis[votu%in%votus, c("Class", "size_kb", "host_taxonomy")]
-
-phold_annot2[grepl("S-adenosyl", product), votu] %>% unique->votus
-length(votus)
-phold_annot2[votu%in% votus] %>% 
-  group_by(product) %>% 
-  count(sort = T) %>% print(n=200)
-vir_analysis[votu%in%votus, c("Class", "size_kb", "host_taxonomy")]
-
-phold_annot2[grepl("cyst", product), votu] %>% unique->votus
-length(votus)
-phold_annot2[votu%in% votus] %>% 
-  group_by(product) %>% 
-  count(sort = T) %>% print(n=200)
-vir_analysis[votu%in%votus, c("Class", "size_kb", "host_taxonomy")]
-```
-
-## Examine products
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_products_aero[simple_category=="Sulfur compounds"];selected_mets
-met_report(selected_mets,
-           fba_products_aero,
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           "produced",
-           ko_f_aero, fisher_aero)
-
-selected_mets<-sorted_products_anaero[simple_category=="Sulfur compounds"];selected_mets
-met_report(selected_mets,
-           fba_products_anaero,
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           "produced",
-           ko_f_anaero, fisher_anaero)
-
-find_metab_react("cpd00239", tidy_reactions) %>% datatable
-
-key_metabolites[name=="5-Methylthio-D-ribose"]
-find_metab_react("cpd01981", tidy_reactions) %>% datatable
-```
-
-## Examine mixed
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_mixed_aero[simple_category=="Sulfur compounds"];selected_mets
-met_report(selected_mets,
-           fba_comp_metab1[sim_O2==T & anaerobic==F],
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           c("consumed", "produced", "transported"),
-           ko_f_aero, fisher_aero)
-
-selected_mets<-sorted_mixed_anaero[simple_category=="Sulfur compounds"];selected_mets
-met_report(selected_mets,
-           fba_comp_metab1[sim_O2==F & anaerobic==T],
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           c("consumed", "produced", "transported"),
-           ko_f_anaero, fisher_anaero)
-```
-
-
-
-#-
-# CARBOHYDRATES
-## Examine substrates
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_substrates_aero[simple_category=="Polysaccharides"];selected_mets
-selected_mets<-sorted_substrates_aero[simple_category=="Carbohydrates"];selected_mets
-selected_mets<-sorted_substrates_aero[simple_category=="Sugar Alcohols"];selected_mets
-
-met_report(selected_mets,
-           fba_substrates_aero,
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           "consumed",
-           ko_f_aero, fisher_aero)
-
-
-selected_mets<-sorted_substrates_anaero[simple_category=="Polysaccharides"];selected_mets
-selected_mets<-sorted_substrates_anaero[simple_category=="Carbohydrates"];selected_mets
-selected_mets<-sorted_substrates_anaero[simple_category=="Sugar Alcohols"];selected_mets
-
-
-met_report(selected_mets,
-           fba_substrates_anaero,
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           "consumed",
-           ko_f_anaero, fisher_anaero)
-
-# POlysaccharides
-tidy_reactions_f[grepl("starch", definition), react_name] %>% table
-tidy_reactions_f[grepl("starch", definition), Order] %>% table %>% sort
-
-tidy_reactions_f[grepl("Xyla", definition), react_name] %>% table
-tidy_reactions_f[grepl("Xyla", definition), Order] %>% table %>% sort
-
-tidy_reactions_f[grepl("Inulin", definition), react_name] %>% table
-tidy_reactions_f[grepl("Inulin", definition), Order] %>% table %>% sort
-
-#Monosaccharides
-key_metabolites[name=="D-Glucose"]
-find_metab_react("cpd00027", tidy_reactions) %>% datatable
-
-key_metabolites[name=="Galactose"]
-find_metab_react("cpd00108", tidy_reactions) %>% datatable
-
-key_metabolites[name=="Dulcose"]
-find_metab_react("cpd01171", tidy_reactions) %>% datatable
-
-key_metabolites[name=="D-Fructose", id, name]
-find_metab_react("cpd00082", tidy_reactions) %>% datatable
-
-
-key_metabolites[name=="Sorbitol", id, name]
-find_metab_react("cpd00588", tidy_reactions) %>% datatable
-
-
-key_metabolites[name=="D-fructose-6-phosphate", id, name]
-find_metab_react("cpd00072", tidy_reactions) %>% datatable
-
-tidy_reactions[grepl("ATP:D-fructose 1-phosphotransferase", react_name)]
-
-tidy_reactions[grepl("gamma-glutamylaminopeptidase", react_name)]
-key_metabolites[name=="Cys-Gly", id, name]
-find_metab_react("cpd01017", tidy_reactions) %>% datatable
-
-
-key_metabolites[grepl("Oxoproline",name), id, name]
-find_metab_react("cpd01293", tidy_reactions) %>% datatable
-
-```
-
-## Examine products
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_products_aero[simple_category=="Polysaccharides"];selected_mets
-selected_mets<-sorted_products_aero[simple_category=="Carbohydrates"];selected_mets
-selected_mets<-sorted_products_aero[simple_category=="Sugar Alcohols"];selected_mets
-
-met_report(selected_mets,
-           fba_products_aero,
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           "produced",
-           ko_f_aero, fisher_aero)
-
-selected_mets<-sorted_products_anaero[eval(exp)];selected_mets
-met_report(selected_mets,
-           fba_products_anaero,
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           "produced",
-           ko_f_anaero, fisher_anaero)
-```
-
-## Examine mixed
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_mixed_aero[simple_category=="Polysaccharides"];selected_mets
-met_report(selected_mets,
-           fba_comp_metab1[sim_O2==T & anaerobic==F],
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           c("consumed", "produced", "transported"),
-           ko_f_aero, fisher_aero)
-
-selected_mets<-sorted_mixed_anaero[eval(exp)];selected_mets
-met_report(selected_mets,
-           fba_comp_metab1[sim_O2==F & anaerobic==T],
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           c("consumed", "produced", "transported"),
-           ko_f_aero, fisher_anaero)
-```
-
-#-
-# ALCOHLS
-## Examine substrates
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_substrates_aero[simple_category=="Alcohols"];selected_mets
-met_report(selected_mets,
-           fba_substrates_aero,
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           "consumed",
-           ko_f_aero, fisher_aero)
-
-
-selected_mets<-sorted_substrates_anaero[simple_category=="Alcohols"];selected_mets
-met_report(selected_mets,
-           fba_substrates_anaero,
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           "consumed",
-           ko_f_anaero, fisher_anaero)
-
-# Methanol
-key_metabolites[name=="Methanol"]
-find_metab_react("cpd00116", tidy_reactions[]) %>% datatable
-
-#Converted all to formaldehyde
-tidy_exhanges[name=="Formaldehyde", ] 
-
-key_metabolites[name=="Formaldehyde"]
-find_metab_react("cpd00055", tidy_reactions[]) -> res; res %>% datatable
-
-gapseq_pwy_hierarchy[sbs %in% unlist(strsplit(res$sbs_ids , ";"))] %>% view
-
-```
-
-## Examine products
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_products_aero[simple_category=="Alcohols"];selected_mets
-met_report(selected_mets,
-           fba_products_aero,
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           "produced",
-            ko_f_aero, fisher_aero)
-
-
-selected_mets<-sorted_products_anaero[eval(exp),];selected_mets
-met_report(selected_mets,
-           fba_products_anaero,
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           "produced",
-           ko_f_aero, fisher_aero)
-react_hm(react_df=fba_reactions_f[sim_O2==T & anaerobic==F])
-```
-
-## Examine mixed
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_mixed_aero[eval(exp)];selected_mets
-met_report(selected_mets,
-           fba_comp_metab1[sim_O2==T & anaerobic==F],
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           c("consumed", "produced", "transported"),
-           ko_f_aero, fisher_aero)
-
-selected_mets<-sorted_mixed_anaero[eval(exp)];selected_mets
-met_report(selected_mets,
-           fba_comp_metab1[sim_O2==F & anaerobic==T],
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           c("consumed", "produced", "transported"),
-           ko_f_aero, fisher_anaero)
-```
-#-
-# CARBOXYLS
-## Examine substrates
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_substrates_aero[simple_category=="Carbonyl compounds",];selected_mets
-met_report(selected_mets,
-           fba_substrates_aero,
-           tidy_reactions_f,
-           "consumed",
-           ko_f_aero, fisher_aero)
-
- selected_mets<-sorted_substrates_anaero[simple_category=="Carbonyl compounds"];selected_mets
-met_report(selected_mets,
-           fba_substrates_anaero,
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           "consumed",
-           ko_f_anaero, fisher_anaero)
-
-
-substrate_fba_median
-############# Formate ################
-key_metabolites[name=="Formate"]
-find_metab_react("cpd00047", tidy_reactions[]) -> res; res %>% datatable
-gapseq_pwy_hierarchy[sbs %in% unlist(strsplit(res$sbs_ids , ";"))] %>% view
-
-############# Lactate ################
-key_metabolites[name=="L-Lactate"]
-find_metab_react("cpd00159", tidy_reactions[]) -> res; res %>% datatable
-gapseq_pwy_hierarchy[sbs %in% unlist(strsplit(res$sbs_ids , ";"))] %>% view
-
-############# Malate ################
-key_metabolites[name=="L-Malate"]
-find_metab_react("cpd00130", tidy_reactions_f[]) -> res; res %>% datatable
-gapseq_pwy_hierarchy[sbs %in% unlist(strsplit(res$sbs_ids , ";"))] %>% view
-
-key_metabolites[name=="Oxaloacetate"]
-find_metab_react("cpd00032", tidy_reactions[]) -> res; res %>% datatable
-
-key_metabolites[name=="Malyl-CoA"]
-find_metab_react("cpd02662", tidy_reactions[]) -> res; res %>% datatable
-
-key_metabolites[name=="Glyoxalate"]
-find_metab_react("cpd00040", tidy_reactions[]) -> res; res %>% datatable
-
-
-key_metabolites[name=="Sinapoyl malate"]
-find_metab_react("cpd01849", tidy_reactions[]) -> res; res %>% datatable
-
-############# 2-Oxoglutarate ################
-key_metabolites[name=="2-Oxoglutarate"]
-find_metab_react("cpd00024", tidy_reactions_f[]) -> res; res %>% datatable
-gapseq_pwy_hierarchy[sbs %in% unlist(strsplit(res$sbs_ids , ";"))] %>% view
-
-```
-
-## Examine products
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_products_aero[simple_category=="Carbonyl compounds",];selected_mets
-met_report(selected_mets,
-           fba_products_aero,
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           "produced",
-            ko_f_aero, fisher_aero)
-
-
-selected_mets<-sorted_products_anaero[simple_category=="Carbonyl compounds",];selected_mets
-met_report(selected_mets,
-           fba_products_anaero,
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           "produced",
-           ko_f_anaero, fisher_anaero)
-react_hm(react_df=fba_reactions_f[sim_O2==T & anaerobic==F])
-react_hm(react_df=fba_reactions_f[sim_O2==F & anaerobic==T])
-
-```
-
-## Examine mixed
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_mixed_aero[simple_category=="Carbonyl compounds"];selected_mets
-met_report(selected_mets,
-           fba_comp_metab1[sim_O2==T & anaerobic==F],
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           c("consumed", "produced", "transported"),
-           ko_f_aero, fisher_aero)
-
-selected_mets<-sorted_mixed_anaero[simple_category=="Carbonyl compounds"];selected_mets
-met_report(selected_mets,
-           fba_comp_metab1[sim_O2==F & anaerobic==T],
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           c("consumed", "produced", "transported"),
-           ko_f_aero, fisher_anaero)
-```
-#-
-# Metals
-## Examine substrates
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_substrates_aero[simple_category=="Metals",
-                                      ];selected_mets
-
-met_report(selected_mets,
-           fba_substrates_aero,
-           tidy_reactions,
-           c("consumed", "produced", "transported"),
-           ko_f_aero, fisher_aero)
-
-met_report(selected_mets,
-           fba_substrates_aero,
-           fba_reactions[sim_O2==F & anaerobic==T],
-           c("consumed", "produced", "transported"),
-           ko_f_aero, fisher_aero)
-
-# Who uses cobalt for biosynth?
-#Cobaltochelatase
-tidy_reactions_f[react_id=="rxn04045_c0"]%>%
-  group_by(Order) %>% count(sort = T)
-
-#hydrogenobyrinic-acid-a,c-diamide:cobalt cobalt-ligase (ADP-forming)
-tidy_reactions_f[react_id=="rxn03542_c0"] %>%
-  group_by(Order) %>% count(sort = T)
-
-# Fe3+ oxidation
-
-tidy_reactions_f[react_id=="rxn00068_c0"]%>%
-  group_by(Order) %>% count(sort = T)
-
-# Mg in chlorophyllide
-tidy_reactions_f[react_id=="rxn02733_c0"]%>%
-  group_by(Order) %>% count(sort = T) #nope
-```
-#-
-# N-carbonyls
-## Examine substrates
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_substrates_aero[simple_category=="N-Carbonyl compounds"];selected_mets
-
-met_report(selected_mets,
-           fba_substrates_aero,
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           "consumed",
-           ko_f_aero, fisher_aero)
-
-
-selected_mets<-sorted_substrates_anaero[simple_category=="N-Carbonyl compounds"];selected_mets
-met_report(selected_mets,
-           fba_substrates_anaero,
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           "consumed",
-           ko_f_anaero, fisher_anaero)
-
-
-# Follow betaine degradation
-res$react_summary[metabolite=="Betaine"] %>% datatable
-
-key_metabolites[grepl("Betaine",name, ignore.case=T)]
-find_metab_react(met_id="cpd00540",
-                 reactions =  tidy_reactions_f) %>% datatable()
-
-key_metabolites[grepl("Betaine aldehyde",name, ignore.case=T)]
-find_metab_react(met_id="cpd00447",
-                 reactions =  tidy_reactions) %>% datatable()
-
-key_metabolites[grepl("Choline",name, ignore.case=T)]
-find_metab_react(met_id="cpd00098",
-                 reactions =  tidy_reactions) -> res;res%>%datatable()
-
-sbs_hier1[sbs %in% unlist(strsplit(res$sbs_ids , ";")), ]
-
-key_metabolites[grepl("Methylamine",name, ignore.case=T)]
-find_metab_react(met_id="cpd00441",
-                 reactions =  tidy_reactions) %>% datatable()
-
-key_metabolites[grepl("Dimethylglycine",name, ignore.case=T)]
-find_metab_react(met_id="cpd00756",
-                 reactions =  tidy_reactions) %>% datatable()
-
-
-# Follow S-Adenosyl-L-methionine
-fba_reactions[grepl("S-Adenosyl-L-methionine",react_name)] %>% 
-  group_by(react_name,definition) %>% count 
-
-
-phold_annot2[votu %in%
-blast_phold[grepl("S-adenosylmethionine decarboxylase", product), votu]] 
-
-
-fba_reactions[grepl("methioninamine",react_name)] %>% 
-  group_by(react_name, definition) %>% count 
-
-key_metabolites[grepl("Niacin",name, ignore.case=T)]
-find_metab_react(met_id="cpd00218",
-                 reactions =  fba_reactions_f[sim_O2==T & anaerobic==F]) %>% datatable()
-
-fba_reactions[grepl("nicotinamide",react_name)] %>% 
-  group_by(react_name, definition) %>% 
-  summarise(median_fba=median(fba_flux),
-            n=n()
-            ) 
-
-fba_reactions[grepl("methylamine",react_name)] %>% 
-  group_by(react_name, definition) %>% 
-  summarise(median_fba=median(fba_flux),
-            n=n()
-            ) 
-
-```
-
-## Examine products 
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_products_aero[simple_category=="N-Carbonyl compounds"];selected_mets
-met_report(selected_mets,
-           fba_products_aero,
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           "produced",
-           ko_f_aero, fisher_aero)
-
-selected_mets<-sorted_products_anaero[simple_category=="N-Carbonyl compounds"];selected_mets
-met_report(selected_mets,
-           fba_products_anaero,
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           "produced",
-           ko_f_anaero, fisher_anaero) 
-react_hm(react_df=fba_reactions_f[sim_O2==T & anaerobic==F])
-
-key_metabolites[grepl("Urea",name, ignore.case=T)]
-find_metab_react(met_id="cpd00073",
-                 reactions =  tidy_reactions) -> res;res%>%datatable()
-key_metabolites[grepl("Ornithine",name, ignore.case=T)]
-find_metab_react(met_id="cpd00064",
-                 reactions =  tidy_reactions) -> res;res%>%datatable()
-```
-
-## Examine mixed
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_mixed_aero[simple_category=="N-Carbonyl compounds"];selected_mets
-met_report(selected_mets,
-           fba_comp_metab1[sim_O2==T & anaerobic==F],
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           c("consumed", "produced", "transported"),
-           ko_f_aero, fisher_aero)
-
-selected_mets<-sorted_mixed_anaero[simple_category=="N-Carbonyl compounds"];selected_mets
-met_report(selected_mets,
-           fba_comp_metab1[sim_O2==F & anaerobic==T],
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           c("consumed", "produced", "transported"),
-           ko_f_aero, fisher_anaero)
-```
-# -
-# Amino acids
-## Examine substrates
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_substrates_aero[simple_category=="Amino acids"];selected_mets
-
-met_report(selected_mets,
-           fba_substrates_aero,
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           "consumed",
-           ko_f_aero, fisher_aero)
-
-res$react_summary[metabolite=="L-Methionine"] %>% datatable
-res$react_summary[metabolite=="L-Cysteine"] %>% datatable
-
-
-selected_mets<-sorted_substrates_anaero[simple_category=="Amino acids"];selected_mets
-met_report(selected_mets,
-           fba_substrates_anaero,
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           "consumed",
-           ko_f_anaero, fisher_anaero)
-
-# Follow methionine degradation
-key_metabolites[grepl("L-Methionine",name, ignore.case=T)]
-find_metab_react(met_id="cpd00060",
-                 reactions =  tidy_reactions_f) -> res;res%>%datatable()
-sbs_hier1[sbs %in% unlist(strsplit(res$sbs_ids , ";")), ]
-
-key_metabolites[grepl("2-Aminobut-2-enoate",name, ignore.case=T)]
-find_metab_react(met_id="cpd17424",
-                 reactions =  fba_reactions_f[sim_O2==T & anaerobic==F]) %>% datatable()
-
-key_metabolites[grepl("2-Oxobutyrate",name, ignore.case=T)]
-find_metab_react(met_id="cpd00094",
-                 reactions =  fba_reactions_f[sim_O2==T & anaerobic==F]) %>% datatable()
-
-key_metabolites[grepl("S-Adenosyl-L-methionine",name, ignore.case=T)]
-find_metab_react(met_id="cpd00017",
-                 reactions =  fba_reactions_f[sim_O2==T & anaerobic==F]) -> res;res%>%datatable()
-
-
-sbs_hier1[sbs %in% unlist(strsplit(res$sbs_ids , ";")), ]
-
-######################################################
-# Follow threonine degradation
-key_metabolites[grepl("L-threonine",name, ignore.case=T)]
-find_metab_react(met_id="cpd00161",
-                 reactions =  fba_reactions_f[sim_O2==T & anaerobic==F]) -> res;res%>%datatable()
-sbs_hier1[sbs %in% unlist(strsplit(res$sbs_ids , ";")), ]
-
-
-key_metabolites[grepl("Amino-acetoacetate",name, ignore.case=T)]
-find_metab_react(met_id="cpd02211",
-                 reactions =  fba_reactions_f[sim_O2==T & anaerobic==F]) -> res;res%>%datatable()
-sbs_hier1[sbs %in% unlist(strsplit(res$sbs_ids , ";")), ]
-
-######################################################
-
-key_metabolites[grepl("L-Histidine",name, ignore.case=T)]
-find_metab_react(met_id="cpd00119",
-                 reactions =  tidy_reactions_f) -> res;res%>%datatable()
-sbs_hier1[sbs %in% unlist(strsplit(res$sbs_ids , ";")), ]
-
-
-######################################################
-key_metabolites[grepl("L-Alanine",name, ignore.case=T)]
-find_metab_react(met_id="cpd00035",
-                 reactions =  tidy_reactions_f) -> res;res%>%datatable()
-sbs_hier1[sbs %in% unlist(strsplit(res$sbs_ids , ";")), ]
-######################################################
-key_metabolites[grepl("L-Serine",name, ignore.case=T)]
-find_metab_react(met_id="cpd00054",
-                 reactions =  tidy_reactions_f) -> res;res%>%datatable()
-sbs_hier1[sbs %in% unlist(strsplit(res$sbs_ids , ";")), ]
-
-######################################################
-key_metabolites[grepl("L-Glutamate",name, ignore.case=T)]
-find_metab_react(met_id="cpd00023",
-                 reactions =  tidy_reactions_f) -> res;res%>%datatable()
-sbs_hier1[sbs %in% unlist(strsplit(res$sbs_ids , ";")), h4] %>% table %>% sort
-######################################################
-
-key_metabolites[grepl("Cysteate",name, ignore.case=T)]
-find_metab_react(met_id="cpd00051",
-                 reactions =  fba_reactions_f[sim_O2==T & anaerobic==F]) %>% datatable()
-
-fba_reactions[grepl("S-Adenosyl-L-methionine",react_name)] %>% 
-  group_by(react_name,definition) %>% count 
-
-
-phold_annot2[votu %in%
-blast_phold[grepl("S-adenosylmethionine decarboxylase", product), votu]] 
-
-
-fba_reactions[grepl("methioninamine",react_name)] %>% 
-  group_by(react_name, definition) %>% count 
-
-key_metabolites[grepl("Niacin",name, ignore.case=T)]
-find_metab_react(met_id="cpd00218",
-                 reactions =  fba_reactions_f[sim_O2==T & anaerobic==F]) %>% datatable()
-
-fba_reactions[grepl("nicotinamide",react_name)] %>% 
-  group_by(react_name, definition) %>% 
-  summarise(median_fba=median(fba_flux),
-            n=n()
-            ) %>% view
-
-fba_reactions[grepl("methylamine",react_name)] %>% 
-  group_by(react_name, definition) %>% 
-  summarise(median_fba=median(fba_flux),
-            n=n()
-            ) %>% view
-
-```
-
-## Examine products (NO products)
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_products_aero[simple_category=="N-Carbonyl compounds"];selected_mets
-met_report(selected_mets,
-           fba_products_aero,
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           "produced",
-           ko_f_aero, fisher_aero)
-
-selected_mets<-sorted_products_anaero[simple_category=="N-Carbonyl compounds"];selected_mets
-met_report(selected_mets,
-           fba_products_anaero,
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           "produced",
-           ko_f_anaero, fisher_anaero) 
-react_hm(react_df=fba_reactions_f[sim_O2==T & anaerobic==F])
-```
-
-## Examine mixed
-```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-selected_mets<-sorted_mixed_aero[simple_category=="N-Carbonyl compounds"];selected_mets
-met_report(selected_mets,
-           fba_comp_metab1[sim_O2==T & anaerobic==F],
-           fba_reactions_f[sim_O2==T & anaerobic==F],
-           c("consumed", "produced", "transported"),
-           ko_f_aero, fisher_aero)
-
-selected_mets<-sorted_mixed_anaero[simple_category=="N-Carbonyl compounds"];selected_mets
-met_report(selected_mets,
-           fba_comp_metab1[sim_O2==F & anaerobic==T],
-           fba_reactions_f[sim_O2==F & anaerobic==T],
-           c("consumed", "produced", "transported"),
-           ko_f_aero, fisher_anaero)
-```
-#----
-
-# ORDER - SPECIFIC REPORTS
-#################################################
-
-## Bacteroidales
+## Heatmap: PWYs by key categories v2
 ```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-# Acetate production is high and enhriched in Chromatiales, why?
-key_metabolites[name=="Acetate"]
-find_metab_react("cpd00029", tidy_reactions_f[Order == "Bacteroidales"]) %>%
-  filter(utilisation == "produced")%>% arrange(desc(prop_gems))-> res; res %>% datatable
-res$react_name[1:5]
+# Import pwy data
+pwy_processes<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/pathway_process_heatmap_long_reduced.csv") %>% data.table()
 
-tidy_reactions_f[react_id2 == 'rxn00172'] %>%
-  group_by(Order) %>% count %>% arrange(desc(n))
+pwy_processes[, c("pathway", "process")] %>% unique -> pwy_processes_u
 
-key_metabolites[name=="Acetyl-CoA", c("id", "name")]
-find_metab_react("cpd00022", tidy_reactions_f[Order == "Bacteroidales"]) %>%
-  filter(utilisation == "produced") %>% arrange(desc(prop_gems))-> res; res %>% datatable
-res$react_name[1:5]
+# Select orders
+c("Bacteroidales", "Flavobacteriales", "Cytophagales", "Desulfobulbales", "Desulfobacterales",
+  "Rhodobacterales", "Pseudomonadales", "Chromatiales", "Caldilineales",
+  "Rhizobiales", "Woeseiales", "JAAYZQ01", "SZUA-229"
+             ) -> sel_orders
 
-
-key_metabolites[name=="Acetylphosphate", c("id", "name")]
-find_metab_react("cpd00196", tidy_reactions_f[Order == "Bacteroidales"]) %>%
-  filter(utilisation == "produced") %>% arrange(desc(prop_gems))-> res; res %>% datatable
-res$react_name[1:5]
+## Wider alternative
+votu_order_count_all %>%
+  filter(n_votu>=2) -> order_min2_votu
 
 
-key_metabolites[name=="Pyruvate", c("id", "name")]
-find_metab_react("cpd00020", tidy_reactions_f[Order == "Bacteroidales"]) %>%
-  filter(utilisation == "produced") %>% arrange(desc(prop_gems))-> res; res %>% datatable
+files<-list.files(path = "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/metaG/coassemby_07feb24/mags_c70c10a99/gapseq/",
+                  pattern ="-all-Pathways.tbl", full.names = T)
+foreach(i = files)%do%{
+fread(i) %>%
+  filter(Prediction) %>% 
+  mutate(sbs_ids = str_remove_all(ID, "\\|")) %>%
+  left_join(sbs_hier1) %>%
+    add_column(OTU=str_extract(i, "[:alpha:]{3}_SemiBin_[:digit:]+"))
+  } %>% rbindlist -> pws
+
+pws %>%
+  select(OTU, Name, h2, h3, h4, h5, ReactionsFound) %>%
+  left_join(gem_analysis[,c("OTU", "Order")]) %>%
+  rowwise %>%
+  mutate(n_react=length(unlist(strsplit(ReactionsFound, " ")))) %>%
+  data.table -> pws1
 
 
-key_metabolites[name=="L-Lactate", c("id", "name")]
-find_metab_react("cpd00159", tidy_reactions[Order == "Bacteroidales"]) %>%
-  filter(utilisation == "produced") %>% arrange(desc(prop_gems))-> res; res %>% datatable
-Lactate
+# vOTU abundance by host order
+votu_host_order_abund<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/votu_host_order_mean.csv")
+votu_host_order_abund$Order = str_remove(votu_host_order_abund$Order,"o__")
+votu_host_order_abund_vec<-votu_host_order_abund$mean
+names(votu_host_order_abund_vec) = votu_host_order_abund$Order
+
+# Impoort manually curated pwys
+selected_pwys_cat<-fread("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/tables/pwy_selectio_hm_18mag26 - pathway_classifiation (3).csv") %>% data.table
+
+selected_pwys_cat$cat%>%unique
+selected_pwys_cat$Name%>%unique
+
+# Define splitting vectors columns
+gem_analysis$Phylum %>% as.factor->phy_vec
+names(phy_vec)=gem_analysis %>% pull(Order)
+
+
+# Check pwy distribution by categories
+pws1 %>%
+  filter(Order %in% sel_orders) %>%
+  filter(Name %in% pwy_fish_ehnr_h$Name) %>% 
+  group_by(Order, h2, Name) %>% 
+  summarise(nmag = length(unique(OTU))) -> enh_pwy_summary
+
+pws1 %>%
+  filter(Order %in% sel_orders) %>%
+  filter(Name %in% selected_pwys_cat$Name) %>% 
+  group_by(Order, h2, Name) %>% 
+  summarise(nmag = length(unique(OTU))) -> sel_pwy_summary
+
+enh_pwy_summary %>%
+  group_by(h2, Name) %>%
+  summarise(nmags=sum(nmag)) %>% 
+  mutate(prop=
+           100*(nmags/nrow(gem_analysis[Order %in% sel_orders]))
+         ) -> enh_pwy_summary1
+enh_pwy_summary1$h2 %>% table
+
+sel_pwy_summary %>%
+  group_by(h2, Name) %>%
+  summarise(nmags=sum(nmag)) %>% 
+  mutate(
+    prop=100*(nmags/nrow(gem_analysis[Order %in% sel_orders]))
+         )-> sel_pwy_summary1
+
+
+# Sulphur hm --------------------------------------------------------
+
+selected_pwys_cat[cat == "Sulphur cycling"]-> rsplit_sel
+
+# Define row splits
+rsplit_sel$type %<>% factor(levels = unique(rsplit_sel$type))
+rsplit_sel$type -> rsplit_vec
+names(rsplit_vec)=rsplit_sel %>% pull(Name)
+
+
+# Prepare frequency matrix
+
+pws1 %>%
+  filter(Order %in% sel_orders) %>%
+  filter(Name %in% rsplit_sel$Name) %>% 
+  group_by(Order, Name) %>% 
+  summarise(nmag = length(unique(OTU))) %>%
+  ungroup() %>%
+  complete(Order, Name, fill = list(nmag = 0)) %>%   # keeps all orders
+  left_join(order_nmags, by = "Order") %>%
+  mutate(p = 100 * (nmag / n)) %>%
+  select(Order, Name, p) %>%
+  unique() %>% 
+  mutate(p = case_when(p < 25 ~ 0, .default = p)) -> pwy_count
+  
+
+
+pwy_count %>% pivot_wider(names_from = Order, values_from = p, values_fill = 0) %>% 
+  column_to_rownames("Name")  %>% as.matrix -> mat
+
+length(rsplit_vec)
+nrow(mat)
+
+# Top annot
+HeatmapAnnotation(
+  "MAG phylum" = phy_vec[colnames(mat)],
+  which = "column",
+  col = list("MAG phylum"=tree_colors),
+  border = T,  show_legend = F,
+  show_annotation_name = F,
+    annotation_name_side = "right"
+)-> top_annot
+
+c("white",                  
+    "green4",
+    "gray50",
+    "orange",
+    "lightgoldenrod1",
+    "lightblue",
+    "lightcoral",
+    "olivedrab3")
+
+
+require(ComplexHeatmap)
+
+Heatmap(
+  mat[],
+  name="xxx",
+  col = c("white", "white", "tan1", "orange"),
+  rect_gp = gpar(col = "gray20", lwd = 0.5),
+  border_gp = gpar(col = "black", lwd = 0.9),
+  row_gap= unit(3, "mm"),
+  column_gap= unit(3, "mm"),
+  row_split = rsplit_vec[rownames(mat)],
+  column_title_rot = 45,
+  column_names_rot = 45,
+  #column_names_gp  = gpar(fontsize=2),
+  column_split = phy_vec[colnames(mat)],
+  column_title_side = "bottom",
+  column_title_gp = gpar(fontsize=0),
+  #row_split = aux_gem_annot_vec[rownames(mag_vir_hm)],
+  row_title_rot=0, 
+  #row_title_gp = gpar(fontsize=1),
+  row_names_gp = gpar(fontsize=12),
+  column_names_side = "top",
+  border = T,
+  cluster_rows = T,
+  cluster_columns = F,
+  cluster_column_slices = F,
+  cluster_row_slices = F,
+  show_column_dend = F,
+  show_row_dend = F,
+  #heatmap_height = unit(3, "in"),
+  heatmap_width = unit(10, "in"),
+  show_heatmap_legend = T,
+  heatmap_legend_param =list(title = "% of GEMs\nwith pathway",
+                             direction = "horizontal",
+                             border=T,
+                             title_position = "topcenter",
+                             legend_height = unit(8, "cm"),
+                             grid_width    = unit(16, "mm"),
+                             title_gp      = gpar(fontsize = 14, fontface = "bold"),
+                             labels_gp     = gpar(fontsize = 12)
+                             
+                             ),
+  top_annotation = NULL,
+  width           = ncol(mat) * 1,   # fixed: same cols in every slice
+  height          = nrow(mat) * 1  
+) -> hm1;hm1
+
+
+# Nitrogen hm --------------------------------------------------------
+selected_pwys_cat[cat == "Nitrogen mineralisation"]-> rsplit_sel
+
+# Define row splits
+rsplit_sel$type %<>% factor(levels = unique(rsplit_sel$type))
+rsplit_sel$type -> rsplit_vec
+names(rsplit_vec)=rsplit_sel %>% pull(Name)
+
+
+# Prepare frequency matrix
+
+pws1 %>%
+  filter(Order %in% sel_orders) %>%
+  filter(Name %in% rsplit_sel$Name) %>%
+  group_by(Order, Name) %>% 
+  summarise(nmag = length(unique(OTU))) %>%
+  ungroup() %>%
+  complete(Order, Name, fill = list(nmag = 0)) %>%   # keeps all orders
+  left_join(order_nmags, by = "Order") %>%
+  mutate(p = 100 * (nmag / n)) %>%
+  select(Order, Name, p) %>%
+  unique() %>%
+  mutate(p = case_when(p < 25 ~ 0, .default = p)) -> pwy_count
+
+
+pwy_count %>% pivot_wider(names_from = Order, values_from = p, values_fill = 0) %>% 
+  column_to_rownames("Name")  %>% as.matrix -> mat
+
+length(rsplit_vec)
+nrow(mat)
+
+# Top annot
+HeatmapAnnotation(
+  "MAG phylum" = phy_vec[colnames(mat)],
+  which = "column",
+  col = list("MAG phylum"=tree_colors),
+  border = T,  show_legend = F,
+  show_annotation_name = F,
+    annotation_name_side = "right"
+)-> top_annot
+
+require(ComplexHeatmap)
+
+Heatmap(
+  mat[],
+  name="xxx",
+  col = c("white", "white", "salmon", "red"),
+  rect_gp = gpar(col = "gray20", lwd = 0.5),
+  border_gp = gpar(col = "black", lwd = 0.9),
+  row_gap= unit(3, "mm"),
+  column_gap= unit(3, "mm"),
+  row_split = rsplit_vec[rownames(mat)],
+  column_title_rot = 45,
+  column_names_rot = 45,
+  #column_names_gp  = gpar(fontsize=2),
+  column_split = phy_vec[colnames(mat)],
+  column_title_side = "bottom",
+  column_title_gp = gpar(fontsize=0),
+  #row_split = aux_gem_annot_vec[rownames(mag_vir_hm)],
+  row_title_rot=0, 
+  #row_title_gp = gpar(fontsize=1),
+  row_names_gp = gpar(fontsize=12),
+  column_names_side = "top",
+  border = T,
+  cluster_rows = T,
+  cluster_columns = F,
+  cluster_column_slices = F,
+  cluster_row_slices = F,
+  show_column_dend = F,
+  show_row_dend = F,
+  #heatmap_height = unit(3, "in"),
+  heatmap_width = unit(10, "in"),
+  show_heatmap_legend = F,
+  heatmap_legend_param =list(title = "% of GEMs\nwith pathway",
+                             direction = "horizontal",
+                             border=T,
+                             title_position = "topcenter",
+                             legend_height = unit(8, "cm"),
+                             grid_width    = unit(16, "mm"),
+                             title_gp      = gpar(fontsize = 14, fontface = "bold"),
+                             labels_gp     = gpar(fontsize = 12)
+                             
+                             ),
+  top_annotation = NULL,
+  width           = ncol(mat) * 1,   # fixed: same cols in every slice
+  height          = nrow(mat) * 1  
+) -> hm2;hm2
+
+# Polysach and carbo hm --------------------------------------------------------
+selected_pwys_cat[cat == "Carbohydrates degradation"]-> rsplit_sel
+
+# Define row splits
+rsplit_sel$type %<>% factor(levels = unique(rsplit_sel$type))
+rsplit_sel$type -> rsplit_vec
+names(rsplit_vec)=rsplit_sel %>% pull(Name)
+
+
+# Prepare frequency matrix
+pws1 %>%
+  filter(Order %in% sel_orders) %>%
+  filter(Name %in% rsplit_sel$Name) %>%
+  group_by(Order, Name) %>% 
+  summarise(nmag = length(unique(OTU))) %>%
+  ungroup() %>%
+  complete(Order, Name, fill = list(nmag = 0)) %>%   # keeps all orders
+  left_join(order_nmags, by = "Order") %>%
+  mutate(p = 100 * (nmag / n)) %>%
+  select(Order, Name, p) %>%
+  unique() %>%
+  mutate(p = case_when(p < 25 ~ 0, .default = p)) -> pwy_count
+  
+
+
+pwy_count %>% pivot_wider(names_from = Order, values_from = p, values_fill = 0) %>% 
+  column_to_rownames("Name")  %>% as.matrix -> mat
+
+length(rsplit_vec)
+nrow(mat)
+
+# Top annot
+HeatmapAnnotation(
+  "MAG phylum" = phy_vec[colnames(mat)],
+  which = "column",
+  col = list("MAG phylum"=tree_colors),
+  border = T,  show_legend = F,
+  show_annotation_name = F,
+    annotation_name_side = "right"
+)-> top_annot
+
+require(ComplexHeatmap)
+
+Heatmap(
+  mat[],
+  name="xxx",
+  col = c("white", "white", "olivedrab3", "darkgreen"),
+  rect_gp = gpar(col = "gray20", lwd = 0.5),
+  border_gp = gpar(col = "black", lwd = 0.9),
+  row_gap= unit(3, "mm"),
+  column_gap= unit(3, "mm"),
+  row_split = rsplit_vec[rownames(mat)],
+  column_title_rot = 45,
+  column_names_rot = 45,
+  #column_names_gp  = gpar(fontsize=2),
+  column_split = phy_vec[colnames(mat)],
+  column_title_side = "bottom",
+  column_title_gp = gpar(fontsize=0),
+  #row_split = aux_gem_annot_vec[rownames(mag_vir_hm)],
+  row_title_rot=0, 
+  #row_title_gp = gpar(fontsize=1),
+  row_names_gp = gpar(fontsize=12),
+  column_names_side = "top",
+  border = T,
+  cluster_rows = T,
+  cluster_columns = F,
+  cluster_column_slices = F,
+  cluster_row_slices = F,
+  show_column_dend = F,
+  show_row_dend = F,
+  #heatmap_height = unit(3, "in"),
+  heatmap_width = unit(10, "in"),
+  show_heatmap_legend = F,
+  heatmap_legend_param =list(title = "% of GEMs\nwith pathway",
+                             direction = "horizontal",
+                             border=T,
+                             title_position = "topcenter",
+                             legend_height = unit(8, "cm"),
+                             grid_width    = unit(16, "mm"),
+                             title_gp      = gpar(fontsize = 14, fontface = "bold"),
+                             labels_gp     = gpar(fontsize = 12)
+                             
+                             ),
+  top_annotation = NULL,
+  width           = ncol(mat) * 1,   # fixed: same cols in every slice
+  height          = nrow(mat) * 1  
+) -> hm3;hm3
+
+# Fermentation --------------------------------------------------------
+selected_pwys_cat[cat %in% c("Fermentation", "Carboxylate degradation")]-> rsplit_sel
+
+
+# Define row splits
+rsplit_sel$type %<>% factor(levels = unique(rsplit_sel$type))
+rsplit_sel$type -> rsplit_vec
+names(rsplit_vec)=rsplit_sel %>% pull(Name)
+
+
+# Prepare frequency matrix
+pws1 %>%
+  filter(Order %in% sel_orders) %>%
+  filter(Name %in% rsplit_sel$Name) %>%
+  group_by(Order, Name) %>% 
+  summarise(nmag = length(unique(OTU))) %>%
+  ungroup() %>%
+  complete(Order, Name, fill = list(nmag = 0)) %>%   # keeps all orders
+  left_join(order_nmags, by = "Order") %>%
+  mutate(p = 100 * (nmag / n)) %>%
+  select(Order, Name, p) %>%
+  unique() %>%
+  mutate(p = case_when(p < 25 ~ 0, .default = p)) -> pwy_count
+  
+
+
+pwy_count %>% pivot_wider(names_from = Order, values_from = p, values_fill = 0) %>% 
+  column_to_rownames("Name")  %>% as.matrix -> mat
+
+length(rsplit_vec)
+nrow(mat)
+
+# Top annot
+HeatmapAnnotation(
+  "MAG phylum" = phy_vec[colnames(mat)],
+  which = "column",
+  col = list("MAG phylum"=tree_colors),
+  border = T,  show_legend = F,
+  show_annotation_name = F,
+    annotation_name_side = "right"
+)-> top_annot
+
+require(ComplexHeatmap)
+
+Heatmap(
+  mat[],
+  name="xxx",
+  col = c("white", "white", "skyblue", "turquoise4"),
+  rect_gp = gpar(col = "gray20", lwd = 0.5),
+  border_gp = gpar(col = "black", lwd = 0.9),
+  row_gap= unit(3, "mm"),
+  column_gap= unit(3, "mm"),
+  row_split = rsplit_vec[rownames(mat)],
+  column_title_rot = 45,
+  column_names_rot = 45,
+  #column_names_gp  = gpar(fontsize=2),
+  column_split = phy_vec[colnames(mat)],
+  column_title_side = "bottom",
+  column_title_gp = gpar(fontsize=12),
+  #row_split = aux_gem_annot_vec[rownames(mag_vir_hm)],
+  row_title_rot=0, 
+  #row_title_gp = gpar(fontsize=1),
+  row_names_gp = gpar(fontsize=12),
+  column_names_side = "top",
+  border = T,
+  cluster_rows = T,
+  cluster_columns = F,
+  cluster_column_slices = F,
+  cluster_row_slices = F,
+  show_column_dend = F,
+  show_row_dend = F,
+  #heatmap_height = unit(3, "in"),
+  heatmap_width = unit(10, "in"),
+  show_heatmap_legend = F,
+  heatmap_legend_param =list(title = "% of GEMs\nwith pathway",
+                             direction = "horizontal",
+                             border=T,
+                             title_position = "topcenter",
+                             legend_height = unit(8, "cm"),
+                             grid_width    = unit(16, "mm"),
+                             title_gp      = gpar(fontsize = 14, fontface = "bold"),
+                             labels_gp     = gpar(fontsize = 12)
+                             
+                             ),
+  top_annotation = NULL,
+  width           = ncol(mat) * 1,   # fixed: same cols in every slice
+  height          = nrow(mat) * 1   
+) -> hm4;hm4
+
+
+
+
+png(filename = 
+      paste0(
+      "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/hm_pws_pca.png"),
+    width = 16, height = 15, units = "in"
+    , res = 300)
+
+draw(hm3 %v% hm2 %v% hm4 %v% hm1,
+     heatmap_legend_side = "bottom",
+     padding = unit(c(2, 2, 15, 2), "mm"))
+
+dev.off()
+
+file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/hm_pws_pca.png")
+
 ```
 
-## Chromatiales
-```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-# Acetate production is high and enhriched in Chromatiales, why?
-tidy_exhanges[name=="CO2" & fba_flux<0, c("OTU", "Order")]
-
-key_metabolites[name=="Acetate"]
-find_metab_react("cpd00029", tidy_reactions_f[Order == "Chromatiales"]) %>%
-  filter(utilisation == "produced")%>% arrange(desc(prop_gems))-> res; res %>% datatable
-res$react_name[1:5]
-
-key_metabolites[name=="Acetyl-CoA", c("id", "name")]
-find_metab_react("cpd00022", tidy_reactions_f[Order == "Chromatiales"]) %>%
-  filter(utilisation == "produced") %>% arrange(desc(prop_gems))-> res; res %>% datatable
-res$react_name[1:5]
-
-key_metabolites[name=="Pyruvate", c("id", "name")]
-find_metab_react("cpd00020", tidy_reactions_f[Order == "Chromatiales" & abs(fba_flux)>1]) %>%
-  filter(utilisation == "produced") %>% arrange(desc(prop_gems))-> res; res %>% datatable
-
-key_metabolites[name=="CO2"]
-find_metab_react("cpd00011", tidy_reactions_f[Order == "Chromatiales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-tidy_reactions_f[react_id=="rxn07189_c0"] %>% count(Order, sort = T)
-#################################################
-
-key_metabolites[name=="Oxaloacetate", c("id", "name")]
-find_metab_react("cpd00032", tidy_reactions_f[Order == "Chromatiales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Succinate"]
-find_metab_react("cpd00036", tidy_reactions_f[Order == "Chromatiales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable 
-
-key_metabolites[name=="Ethanol"]
-find_metab_react("cpd00363", tidy_reactions_f[Order == "Chromatiales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable 
-
-key_metabolites[name=="Acetaldehyde"]
-find_metab_react("cpd00071", tidy_reactions_f[Order == "Chromatiales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable 
-
-
-key_metabolites[name=="Fumarate"]
-find_metab_react("cpd00106", tidy_reactions_f[Order == "Chromatiales"]) -> res; res %>% datatable
-
-key_metabolites[name=="CO2"]
-find_metab_react("cpd00011", tidy_reactions_f[Order == "Chromatiales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Oxaloacetate"]
-find_metab_react("cpd00032", tidy_reactions_f[Order == "Chromatiales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Hydrogen"]
-find_metab_react("cpd11640", tidy_reactions_f[Order == "Chromatiales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Hydrogen"]
-find_metab_react("cpd11640", tidy_reactions_f[Order == "Chromatiales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-```
-
-## Caldilineales
-```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-key_metabolites[name=="CO2", c("id", "name")]
-find_metab_react("cpd00011", tidy_reactions_f[Order == "Caldilineales"]) %>%
-  filter(utilisation == "produced" , prop_gems>50) -> res; res %>% datatable
-
-key_metabolites[name=="Formate", c("id", "name")]
-find_metab_react("cpd00047", tidy_reactions[Order == "Caldilineales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-```
-
-## Pseudomonadales
-```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-key_metabolites[name=="Acetate"]
-find_metab_react("cpd00029", tidy_reactions_f[Order == "Pseudomonadales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Acetyl-CoA"]
-find_metab_react("cpd00022", tidy_reactions[Order == "Pseudomonadales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Succinate"]
-find_metab_react("cpd00036", tidy_reactions_f[Order == "Pseudomonadales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-gapseq_pwy_hierarchy[sbs %in% unlist(strsplit(res$sbs_ids , ";"))] %>% view
-
-key_metabolites[name=="Succinyl-CoA"]
-find_metab_react("cpd00078", tidy_reactions_f[Order == "Pseudomonadales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="indol"]
-find_metab_react("cpd00281", tidy_reactions_f[Order == "Pseudomonadales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="GABA"]
-find_metab_react("cpd00281", tidy_reactions_f[Order == "Pseudomonadales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="L-Lactate"]
-find_metab_react("cpd00159", tidy_reactions_f[Order == "Pseudomonadales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Butyrate"]
-find_metab_react("cpd00211", tidy_reactions[Order == "Pseudomonadales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-
-key_metabolites[name=="Butyryl-CoA"]
-find_metab_react("cpd00120", tidy_reactions[Order == "Pseudomonadales"])-> res; res %>% datatable
-
-key_metabolites[name=="Crotonyl-CoA"]
-find_metab_react("cpd00650", tidy_reactions[Order == "Pseudomonadales"])-> res; res %>% datatable
-
-key_metabolites[name=="(S)-3-Hydroxybutyryl-CoA"]
-find_metab_react("cpd00842", tidy_reactions[Order == "Pseudomonadales"])-> res; res %>% datatable
-
-key_metabolites[name=="Oxalate"]
-find_metab_react("cpd00180", tidy_reactions_f[Order == "Pseudomonadales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-
-key_metabolites[name=="Ammonium"]
-find_metab_react("cpd00013", tidy_reactions_f[Order == "Pseudomonadales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-
-
-```
-
-## Desulfobacterales
-```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-key_metabolites[name=="Acetate"]
-find_metab_react("cpd00029", tidy_reactions_f[Order == "Desulfobacterales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Acetyl-CoA"]
-find_metab_react("cpd00022", tidy_reactions_f[Order == "Desulfobacterales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-
-key_metabolites[name=="2-Oxoglutarate"]
-find_metab_react("cpd00024", tidy_reactions_f[Order == "Desulfobacterales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="L-Lactate"]
-find_metab_react("cpd00159", tidy_reactions_f[Order == "Desulfobacterales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Acetate"]
-find_metab_react("cpd00029", tidy_reactions_f[Order == "Desulfobacterales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="GABA"]
-find_metab_react("cpd00281", tidy_reactions_f[Order == "Desulfobacterales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Butyrate"]
-find_metab_react("cpd00211", tidy_reactions_f[Order == "Desulfobacterales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-```
-
-## Rhizobiales
-```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-key_metabolites[name=="Ethanol"]
-find_metab_react("cpd00363", tidy_reactions_f[Order == "Rhizobiales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-
-key_metabolites[name=="Acetaldehyde"]
-find_metab_react("cpd00071", tidy_reactions_f[Order == "Rhizobiales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-
-key_metabolites[name=="Methanol"]
-find_metab_react("cpd00116", tidy_reactions_f[Order == "Rhizobiales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-
-key_metabolites[name=="Propionate"]
-find_metab_react("cpd00141", tidy_reactions_f[Order == "Rhizobiales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-
-
-key_metabolites[name=="indol"]
-find_metab_react("cpd00359", tidy_reactions_f[Order == "Rhizobiales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Thiamin", c("id", "name")]
-find_metab_react("cpd00305", tidy_reactions_f[Order == "Rhizobiales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Hydrogen"]
-find_metab_react("cpd11640", tidy_reactions[Order == "Rhizobiales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-```
-
-
-## Desulfobulbales
-```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-key_metabolites[name=="Propionate"]
-find_metab_react("cpd00141", tidy_reactions_f[Order == "Desulfobulbales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="CO2"]
-find_metab_react("cpd00011", tidy_reactions_f[Order == "Desulfobulbales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-tidy_exhanges[Order == "Desulfobulbales" & fba_flux<0 & name == "Hydrogen"]
-
-key_metabolites[name=="indol"]
-find_metab_react("cpd00359", tidy_reactions_f[Order == "Desulfobulbales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Hydrogen"]
-find_metab_react("cpd11640", tidy_reactions[Order == "Desulfobulbales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Butyrate"]
-find_metab_react("cpd00211", tidy_reactions_f[Order == "Desulfobulbales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-
-key_metabolites[name=="Butyryl-CoA"]
-find_metab_react("cpd00120", tidy_reactions_f[Order == "Desulfobulbales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-
-key_metabolites[name=="Methanethiol"]
-find_metab_react("cpd00324", tidy_reactions_f[Order == "Desulfobulbales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-Urea
-key_metabolites[name=="Urea", c("id", "name")]
-find_metab_react("cpd00073", tidy_reactions[Order == "Desulfobulbales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-```
-
-## Bacteroidales 2
-```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-tidy_exhanges[Order == "Bacteroidales" &
-                simple_category == "Carbonyl compounds" &
-                  fba_flux>0
-                ] %>% 
-  group_by(name) %>%
-  summarise(n=n(),
-            median=median(fba_flux))  %>%
-  arrange(n, median)
-
-key_metabolites[name=="Xylose"]
-find_metab_react("cpd00154", tidy_reactions_f[Order == "Bacteroidales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-
-key_metabolites[name=="Glucuronate"]
-find_metab_react("cpd00164", tidy_reactions[Order == "Bacteroidales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-
-key_metabolites[name=="L-Fucose", c("name", "id")]
-find_metab_react("cpd00751", tidy_reactions[Order == "Bacteroidales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-
-key_metabolites[name=="Acetate"]
-find_metab_react("cpd00029", tidy_reactions_f[Order == "Bacteroidales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-
-key_metabolites[name=="Galactose"]
-find_metab_react("cpd00108", tidy_reactions_f[Order == "Bacteroidales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
-
-key_metabolites[name=="Galactose"]
-find_metab_react("cpd00108", tidy_reactions_f[Order == "Bacteroidales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="L-Fucose"]
-find_metab_react("cpd00751", tidy_reactions_f[Order == "Bacteroidales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="L-Fuculose"]
-find_metab_react("cpd01186", tidy_reactions_f[Order == "Bacteroidales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
-
-key_metabolites[name=="Maltose"]
-find_metab_react("cpd00179", tidy_reactions_f[Order == "Bacteroidales"]) %>%
-  filter(utilisation == "produced")-> res; res %>% datatable
+## PWY PCoA
+```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+# Select orders
+c("Bacteroidales", "Rhizobiales", "Pseudomonadales",  "Rhodobacterales", "Chromatiales", "Flavobacteriales", "Desulfobacterales", "Desulfobulbales", "Cytophagales",  "Woeseiales", "JAAYZQ01", "SZUA-229", "Caldilineales"
+             ) -> sel_orders
+
+# Select orders
+#c("Bacteroidales", "Rhizobiales", "Pseudomonadales",  "Rhodobacterales", "Chromatiales", "Flavobacteriales", #"Desulfobacterales","Desulfobulbales",  "Woeseiales", "SZUA-229"
+#             ) -> sel_orders
+
+## Wider alternative
+votu_order_count_all %>%
+  filter(n_votu>=2)-> order_min2_votu
+
+# Select pathways
+selected_pwys_cat$Name %>% unique -> pws_categories
+
+pws1 %>% 
+    group_by(OTU, Name) %>%
+    filter(Order %in% sel_orders) %>%
+    filter(Name %in% pwy_fish_ehnr$Name) %>%
+    count() %>%
+  pivot_wider(names_from = OTU, values_from = n, values_fill = 0) %>% 
+  column_to_rownames("Name") %>% as.matrix()  %>% t -> mat
+
+# Simiplify names
+gsub("dimethylsulfoniopropanoate ", "DMSP ", colnames(mat)) -> colnames(mat)
+gsub("dimethylsulfoniopropanoate ", "DMSP ", pws_categories) -> pws_categories1
+gsub("degradation", "deg.", colnames(mat)) -> colnames(mat)
+gsub("degradation", "deg.", pws_categories1) -> pws_categories1
+mat[mat>1]=1
+
+order_vec<-gem_analysis[OTU %in% rownames(mat), Order]
+phy_vec<-gem_analysis[OTU %in% rownames(mat), Phylum]
+
+names(order_vec)<-rownames(mat)
+ord_cols<-hcl.colors(palette = "Zissou 1", n = length(unique(order_vec)))
+names(ord_cols) = unique(order_vec)
+
+ord_cols <- c(
+  "Bacteroidales"     = "green4",
+   "Flavobacteriales"  = "aquamarine4",
+  "Cytophagales"      = "springgreen",
+
+  "Chromatiales"      = "#40ABA5",
+  "SZUA-229"          = "cyan1",
+  
+  "JAAYZQ01"          = "black",
+  "Caldilineales"     = "gray",
+
+  "Desulfobacterales" = "gold",
+  "Desulfobulbales"   = "olivedrab2",
+  
+  "Rhodobacterales"   = "mediumvioletred",
+  "Woeseiales"        = "orange",
+  "Rhizobiales"       = "#F5191C",
+  "Pseudomonadales"   = "lightsalmon"
+)
+
+
+
+require(factoextra);require(FactoMineR)
+
+library(vegan)
+library(ape)
+
+# 1. Jaccard distance on binary matrix
+jac_dist <- vegdist(mat, method = "jaccard")
+
+# 2. PCoA
+pcoa_res <- pcoa(jac_dist)
+
+ncomp <- 10  # axes to retain
+
+# 3. Sample scores
+scores <- pcoa_res$vectors[, 1:ncomp]
+
+# 4. Project variables onto PCoA axes via correlation
+loadings <- cor(mat, scores)
+loadings %>% view
+# 5. Positive eigenvalues only
+eig_all_pos <- pcoa_res$values$Eigenvalues[pcoa_res$values$Eigenvalues > 0]
+eig_retained <- eig_all_pos[1:ncomp]
+
+# 6. Build prcomp-compatible object
+pca_like <- list(
+  x        = scores,
+  rotation = loadings,
+  sdev     = sqrt(eig_all_pos),   # all positive — fixes denominator
+  center   = colMeans(mat),
+  scale    = FALSE
+)
+class(pca_like) <- "prcomp"
+
+
+fviz_pca_ind(pca_like,
+                # --- samples ---
+                geom.ind      = "point",
+                pointshape    = 19,
+                col.ind       = order_vec,          # color by group
+                palette       = ord_cols,
+                addEllipses   = T,            # confidence ellipses
+                ellipse.type  = "convex",    # or "convex" / "norm" / "t"
+                ellipse.level = 0.95)  +
+  theme_bw() +
+  guides(color = guide_legend(ncol = 2),
+         fill  = guide_legend(ncol = 2)) +
+  labs(color="MAG Order", fill = "MAG Order") +
+  theme(axis.text = element_text(size=20),
+        text = element_text(size=20),
+        legend.position = "none",
+        legend.position.inside = c(0.81, 0.9),
+        panel.border = element_rect(color="black", linewidth = 1)
+        )  +
+        ylab("PCoA2 (11.5%)") + xlab("PCoA1 (14.5%)") + ggtitle("") -> pwy_pca 
+
+
+
+fviz_pca_biplot(pca_like,
+                # --- samples ---
+                geom.ind      = "point",
+                pointshape    = 19,
+                col.ind       = order_vec,          # color by group
+                palette       = ord_cols,
+                addEllipses   = T,            # confidence ellipses
+                ellipse.type  = "convex",    # or "convex" / "norm" / "t"
+                ellipse.level = 0.95,            # 95% CI
+                label         = c("var"),           # label variables only,
+                labelsize     = 4,  
+                # --- variables (arrows) ---
+                col.var       = "black",
+                alpha.var =    0.2,
+                repel         = TRUE,  
+                title         = "",
+                select.var = list(name = pws_categories1,
+                                  cos2 = 0.4,
+                                  contrib = NULL)
+                ) +
+  theme_bw() +
+  guides(color = guide_legend(ncol = 2),
+         fill  = guide_legend(ncol = 2)) +
+  labs(color="GEM Order", fill = "GEM Order") +
+  theme(axis.text = element_text(size=20),
+        text = element_text(size=20),
+        legend.position = "inside",
+        legend.position.inside = c(0.81, 0.9))  +
+        ylab("PCoA2 (11.5%)") + xlab("PCoA1 (14.5%)")-> pwy_pca_bi;pwy_pca_bi
+
+ 
+
+png(filename = 
+      paste0(
+      "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/hm_pws_biplot.png"),
+    width = 16, height = 13, units = "in", res = 600)
+
+pwy_pca_bi
+
+dev.off()
+file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/hm_pws_biplot.png")
+
+png(filename = 
+      paste0(
+      "~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/hm_pws_pca.png"),
+    width = 16, height = 13, units = "in", res = 600)
+
+pwy_pca
+
+dev.off()
+file.show("~/rstudio-server/nvme_4tb/riccardo/analysis/boschettona23/Results/man_v2/figures/hm_pws_pca.png")
 
 ```
+## PWY PCoA check
+```{r eval=TRUE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
+# ── PCoA ──────────────────────────────────────────────────────────────────────
+dist_matrix <- vegdist(mat, method = "jaccard")
+pcoa_res        <- ape::pcoa(dist_matrix)
+# ── envfit arrows ─────────────────────────────────────────────────────────────
+env <- envfit(pcoa_res$vectors, mat, permutations = 999)
 
-## Woeseiales
-```{r eval=FALSE, echo = FALSE, warning = FALSE, message=FALSE, results='hide'}
-key_metabolites[name=="Cytidine"]
-find_metab_react("cpd00367", tidy_reactions_f[Order == "Woeseiales"]) %>%
-  filter(utilisation == "consumed")-> res; res %>% datatable
+# ── Variance explained ────────────────────────────────────────────────────────
+var_exp <- round(pcoa_res$values$Relative_eig * 100, 1)
+
+# ── plot with base vegan ───────────────────────────────────────────────────────
+plot(pcoa$vectors,
+     col = ord_cols[order_vec[rownames(mat)]],
+     xlab = paste0("PCoA1 (", var_exp[1], "%)"),
+     ylab = paste0("PCoA2 (", var_exp[2], "%)"),
+     main = "PCoA", lwd = 2, pch=20)
+     
+plot(env, p.max = 0.001, col="black")       # only significant arrows
+
+ordiellipse(pcoa$vectors[, 1:2],
+            groups = order_vec[rownames(mat)],
+            kind   = "se",                      # "se", "sd", or "ehull"
+            conf   = 0.95,
+            draw   = "polygon",
+            col    = ord_cols[order_vec[rownames(mat)]],
+            border = ord_cols[order_vec[rownames(mat)]],
+            alpha  = 0.1,
+            lwd    = 1.5) -> p
+
+legend("topright",
+       legend = names(ord_cols),
+       col    = ord_cols,
+       pt.bg  = ord_cols,
+       pch    = 21,
+       cex    = 0.9,
+       bty    = "n")    
+
 ```
-
