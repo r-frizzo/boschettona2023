@@ -1,8 +1,8 @@
 ![App Screenshot](./bosc_ghebo_nat_git_cut.png)
 # boschettona2023
 
-This repository contains the R Scripts and Genome-scale metabolic models (GEMs) used to analyse the data from the paper 
-Viral lysis and host reprogramming impact carbohydrate, amino acid, and osmolyte cycling in salt marsh tidal creek sediments".
+This repository contains the R Scripts and Genome-scale metabolic models (GEMs) from the paper 
+"Viral lysis and host reprogramming impact carbohydrate, amino acid, and osmolyte cycling in salt marsh tidal creek sediments".
 Sequencing reads are available at NCBI (PRJNA1226540).
 
 ## Scripts
